@@ -3,38 +3,38 @@
 // Dentro do arquivo a edição é modal: hjkl, i, v, dd, yy, p, u ...
 // ---- curses: ncurses (Linux/macOS) ou PDCurses/PDCursesMod (Windows)
 #ifdef _WIN32
-  #ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
-    #define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
-  #endif
-  #ifndef PDC_NCMOUSE
-    #define PDC_NCMOUSE  // getmouse/MEVENT no estilo ncurses
-  #endif
+#ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#define _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
+#endif
+#ifndef PDC_NCMOUSE
+#define PDC_NCMOUSE  // getmouse/MEVENT no estilo ncurses
+#endif
 #endif
 #if __has_include(<ncurses/ncurses.h>)
-  #include <ncurses/ncurses.h>
+#include <ncurses/ncurses.h>
 #elif __has_include(<ncursesw/ncurses.h>)
-  #include <ncursesw/ncurses.h>
+#include <ncursesw/ncurses.h>
 #elif __has_include(<ncurses.h>)
-  #include <ncurses.h>
+#include <ncurses.h>
 #else
-  #include <curses.h>
+#include <curses.h>
 #endif
 #include <locale.h>
 #include <csignal>
 #include <cstdint>
 #ifdef _WIN32
-  // Windows: sem fork/pipe/waitpid. O Run sempre usa o "modo terminal completo" (system()).
-  #include <direct.h>
-  #include <stdio.h>
-  #ifdef _MSC_VER
-    typedef int pid_t;
-  #endif
-  #define SEP "\\"
+// Windows: sem fork/pipe/waitpid. O Run sempre usa o "modo terminal completo" (system()).
+#include <direct.h>
+#include <stdio.h>
+#ifdef _MSC_VER
+typedef int pid_t;
+#endif
+#define SEP "\\"
 #else
-  #include <fcntl.h>
-  #include <sys/wait.h>
-  #include <unistd.h>
-  #define SEP "/"
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#define SEP "/"
 #endif
 
 #include <algorithm>
@@ -61,13 +61,13 @@ using std::vector;
 // Internamente todo texto/caminho é UTF-8. No Windows, std::filesystem/fstream/system() usam a codepage ANSI
 // quando recebem std::string, o que quebra acentos; por isso TODO acesso a disco passa por toPath()/pstr().
 #ifdef _MSC_VER
-  #pragma comment(lib, "user32.lib")
+#pragma comment(lib, "user32.lib")
 #endif
 #ifdef _WIN32
 // Declarações mínimas (evita incluir <windows.h>, que conflita com macros do PDCurses como MOUSE_MOVED).
 struct W32_SA { unsigned long n; void* sd; int inherit; };
 struct W32_SI { unsigned long cb; wchar_t* res; wchar_t* desk; wchar_t* title; unsigned long x, y, xs, ys, xc, yc, fill, flags;
-                unsigned short show, cbres2; unsigned char* res2; void* in; void* out; void* err; };
+    unsigned short show, cbres2; unsigned char* res2; void* in; void* out; void* err; };
 struct W32_PI { void* proc; void* thr; unsigned long pid, tid; };
 extern "C" {
 __declspec(dllimport) unsigned long __stdcall GetLogicalDrives(void);
@@ -216,10 +216,10 @@ static string homeDir() {
 }
 
 // ============================================================ tema gruvbox-dark
-enum { K_BG0, K_BG1, K_BG2, K_BG3, K_FG, K_RED, K_GRN, K_YEL, K_BLU, K_PUR, K_AQU, K_ORG, K_GRY, K_LGR, K_BTN, K_DRD, K_N };
+enum { K_BG0, K_BG1, K_BG2, K_BG3, K_FG, K_RED, K_GRN, K_YEL, K_BLU, K_PUR, K_AQU, K_ORG, K_GRY, K_LGR, K_BTN, K_DRD, K_LOR, K_N };
 static const int RGB[K_N][3] = {{40, 40, 40}, {60, 56, 54}, {80, 73, 69}, {102, 92, 84}, {235, 219, 178}, {251, 73, 52}, {184, 187, 38}, {250, 189, 47},
-                                {131, 165, 152}, {211, 134, 155}, {142, 192, 124}, {254, 128, 25}, {146, 131, 116}, {168, 153, 134}, {69, 133, 136}, {204, 36, 29}};
-static const int FB256[K_N] = {235, 237, 239, 241, 223, 167, 142, 214, 109, 175, 108, 208, 245, 246, 66, 124};
+                                {131, 165, 152}, {211, 134, 155}, {142, 192, 124}, {254, 128, 25}, {146, 131, 116}, {168, 153, 134}, {69, 133, 136}, {204, 36, 29}, {255, 170, 90}};
+static const int FB256[K_N] = {235, 237, 239, 241, 223, 167, 142, 214, 109, 175, 108, 208, 245, 246, 66, 124, 215};
 static int C[K_N];
 // Pares de cor: os ids lógicos (P_*) são mapeados para pares compactos (PM). Algumas builds do PDCurses aceitam poucos pares
 // (ou codificam o número do par em poucos bits); pares iguais são reutilizados e, se faltar espaço, o que for cosmético cai num par parecido.
@@ -229,14 +229,14 @@ static int diagPairFail = 0, diagPairLim = 0, diagPairUsed = 0;
 enum { P_TEXT = 1, P_BAR, P_SEL, P_LINENO, P_LINENO_CUR, P_BTN, P_BTN_STOP, P_MENU, P_MENU_ACT, P_TAB, P_TAB_ACT, P_MODE_N, P_MODE_I, P_MODE_V, P_MODE_T,
        P_POP, P_POPSEL, P_DIR, P_ERR, P_WARN, P_NOTE, P_OK, P_GRAY, P_SIDE_SEL, P_SIDE_SELF, P_DLG, P_DLGB, P_DLGT, P_INP, P_INPF, P_BTNX,
        P_HINT, P_TITLE, P_SEP, P_HINTBAR, P_TREEHDR, P_SYN = 40 };
-enum { S_TEXT, S_KW, S_TYPE, S_STR, S_NUM, S_COM, S_PRE, S_FN };
+enum { S_TEXT, S_KW, S_TYPE, S_STR, S_NUM, S_COM, S_PRE, S_FN, S_OP };
 
 // Console de 16 cores (PDCurses clássico / conhost): usa os 16 slots da paleta (redefinidos se possível).
 static bool pal16 = false, palSaved = false; static short savedPal[16][3];
 static int nearest16(int k) {
     static const struct { int c, r, g, b; } STD[16] = {
-        {COLOR_BLACK, 0, 0, 0}, {COLOR_RED, 170, 0, 0}, {COLOR_GREEN, 0, 170, 0}, {COLOR_YELLOW, 170, 85, 0}, {COLOR_BLUE, 0, 0, 170}, {COLOR_MAGENTA, 170, 0, 170}, {COLOR_CYAN, 0, 170, 170}, {COLOR_WHITE, 170, 170, 170},
-        {COLOR_BLACK + 8, 85, 85, 85}, {COLOR_RED + 8, 255, 85, 85}, {COLOR_GREEN + 8, 85, 255, 85}, {COLOR_YELLOW + 8, 255, 255, 85}, {COLOR_BLUE + 8, 85, 85, 255}, {COLOR_MAGENTA + 8, 255, 85, 255}, {COLOR_CYAN + 8, 85, 255, 255}, {COLOR_WHITE + 8, 255, 255, 255}};
+                  {COLOR_BLACK, 0, 0, 0}, {COLOR_RED, 170, 0, 0}, {COLOR_GREEN, 0, 170, 0}, {COLOR_YELLOW, 170, 85, 0}, {COLOR_BLUE, 0, 0, 170}, {COLOR_MAGENTA, 170, 0, 170}, {COLOR_CYAN, 0, 170, 170}, {COLOR_WHITE, 170, 170, 170},
+                  {COLOR_BLACK + 8, 85, 85, 85}, {COLOR_RED + 8, 255, 85, 85}, {COLOR_GREEN + 8, 85, 255, 85}, {COLOR_YELLOW + 8, 255, 255, 85}, {COLOR_BLUE + 8, 85, 85, 255}, {COLOR_MAGENTA + 8, 255, 85, 255}, {COLOR_CYAN + 8, 85, 255, 255}, {COLOR_WHITE + 8, 255, 255, 255}};
     int best = 0, bd = 1 << 30;
     for (int i = 0; i < 16; i++) { int dr = STD[i].r - RGB[k][0], dg = STD[i].g - RGB[k][1], db = STD[i].b - RGB[k][2]; int d = dr * dr + dg * dg + db * db; if (d < bd) { bd = d; best = i; } }
     return STD[best].c;
@@ -251,16 +251,17 @@ static void initTheme() {
     if (COLORS < 256) {
         pal16 = true; bool can = can_change_color();
         for (int i = 0; i < K_N; i++) {
-            if (can) {
+            if (can && i < 16) {
                 color_content((short)i, &savedPal[i][0], &savedPal[i][1], &savedPal[i][2]);
                 init_color((short)i, (short)(RGB[i][0] * 1000 / 255), (short)(RGB[i][1] * 1000 / 255), (short)(RGB[i][2] * 1000 / 255)); C[i] = i;
-            } else C[i] = nearest16(i);
+            } else if (can) C[i] = C[K_ORG];
+            else C[i] = nearest16(i);
         }
         palSaved = can;
     } else for (int i = 0; i < K_N; i++) {
-        if (tc) { init_color(16 + i, RGB[i][0] * 1000 / 255, RGB[i][1] * 1000 / 255, RGB[i][2] * 1000 / 255); C[i] = 16 + i; }
-        else C[i] = FB256[i];
-    }
+            if (tc) { init_color(16 + i, RGB[i][0] * 1000 / 255, RGB[i][1] * 1000 / 255, RGB[i][2] * 1000 / 255); C[i] = 16 + i; }
+            else C[i] = FB256[i];
+        }
     int lim = COLOR_PAIRS > 0 ? COLOR_PAIRS : 64; if (lim > 128) lim = 128;
     for (int n = 1; n < lim; n++) if (PAIR_NUMBER(COLOR_PAIR(n)) != n) { lim = n; break; }  // número do par não cabe no atributo
     diagPairLim = lim;
@@ -271,9 +272,9 @@ static void initTheme() {
         if (nextId < lim && init_pair((short)nextId, (short)C[f], (short)C[b]) == OK) { seen[k] = nextId; PM[id] = nextId++; }
         else { PM[id] = 0; diagPairFail++; }
     };
-    int syn[8] = {K_FG, K_RED, K_YEL, K_GRN, K_PUR, K_GRY, K_AQU, K_BLU};
+    int syn[9] = {K_FG, K_RED, K_YEL, K_GRN, K_PUR, K_GRY, K_AQU, K_BLU, K_LOR};
     P(P_TEXT, K_FG, K_BG0);
-    for (int i = 0; i < 8; i++) P(P_SYN + i, syn[i], K_BG0);  // realce de sintaxe tem prioridade
+    for (int i = 0; i < 9; i++) P(P_SYN + i, syn[i], K_BG0);  // realce de sintaxe tem prioridade
     P(P_BAR, K_FG, K_BG1); P(P_SEL, K_FG, K_BG3); P(P_LINENO, K_GRY, K_BG0); P(P_LINENO_CUR, K_YEL, K_BG1);
     P(P_BTN, K_FG, K_BTN); P(P_BTN_STOP, K_FG, K_DRD); P(P_MENU, K_FG, K_BG1); P(P_MENU_ACT, K_BG0, K_LGR);
     P(P_TAB, K_LGR, K_BG2); P(P_TAB_ACT, K_YEL, K_BG0);
@@ -282,9 +283,9 @@ static void initTheme() {
     P(P_NOTE, K_AQU, K_BG0); P(P_OK, K_GRN, K_BG0); P(P_GRAY, K_GRY, K_BG0); P(P_SIDE_SEL, K_FG, K_BG2); P(P_SIDE_SELF, K_BG0, K_BLU);
     P(P_DLG, K_FG, K_BG1); P(P_DLGB, K_LGR, K_BG1); P(P_DLGT, K_YEL, K_BG1); P(P_INP, K_FG, K_BG0); P(P_INPF, K_FG, K_BG2); P(P_BTNX, K_FG, K_BG2);
     P(P_HINT, K_GRY, K_BG0); P(P_TITLE, K_ORG, K_BG0); P(P_SEP, K_BG3, K_BG0); P(P_HINTBAR, K_GRY, K_BG1); P(P_TREEHDR, K_BLU, K_BG1);
-    for (int i = 0; i < 8; i++) P(P_SYN + 16 + i, syn[i], K_BG1);  // linha atual (por último: é só estético)
+    for (int i = 0; i < 9; i++) P(P_SYN + 16 + i, syn[i], K_BG1);  // linha atual (por último: é só estético)
     for (int id = 1; id < P_SYN + 16; id++) if (!PM[id]) PM[id] = PM[P_TEXT];
-    for (int id = P_SYN + 16; id < P_SYN + 24; id++) if (!PM[id]) PM[id] = PM[id - 16];
+    for (int id = P_SYN + 16; id < P_SYN + 25; id++) if (!PM[id]) PM[id] = PM[id - 16];
     diagPairUsed = nextId - 1;
     bkgd(CP(P_TEXT));
 }
@@ -418,23 +419,23 @@ static void snap(Buffer& b) {
 }
 static void doUndo() {
     if (cur < 0) return; Buffer& b = bufs[cur];
-    if (b.undo.empty()) { setMsg("Nada para desfazer"); return; }
+    if (b.undo.empty()) { setMsg("Nothing to undo"); return; }
     b.redo.push_back({b.lines, b.cy, b.cx, b.dirty}); Snap s = b.undo.back(); b.undo.pop_back();
     b.lines = s.lines; b.cy = s.cy; b.cx = s.cx; b.dirty = s.dirty; clampCursor(b); setWant(b);
 }
 static void doRedo() {
     if (cur < 0) return; Buffer& b = bufs[cur];
-    if (b.redo.empty()) { setMsg("Nada para refazer"); return; }
+    if (b.redo.empty()) { setMsg("Nothing to redo"); return; }
     b.undo.push_back({b.lines, b.cy, b.cx, b.dirty}); Snap s = b.redo.back(); b.redo.pop_back();
     b.lines = s.lines; b.cy = s.cy; b.cx = s.cx; b.dirty = s.dirty; clampCursor(b); setWant(b);
 }
 static bool saveBuffer(Buffer& b) {
     std::ofstream f(toPath(b.path), std::ios::binary);
-    if (!f) { setMsg("Erro ao salvar " + b.path, true); return false; }
+    if (!f) { setMsg("Error saving " + b.path, true); return false; }
     if (b.bom) f << "\xEF\xBB\xBF";
     const char* eol = b.crlf ? "\r\n" : "\n";
     for (auto& l : b.lines) f << l << eol;
-    f.flush(); if (!f) { setMsg("Erro ao gravar " + b.path, true); return false; }
+    f.flush(); if (!f) { setMsg("Error writing " + b.path, true); return false; }
     b.dirty = false; return true;
 }
 static string getRange(Buffer& b, int y1, int x1, int y2, int x2) {
@@ -568,17 +569,17 @@ static void insPasteText(Buffer& b, const string& t) {
     b.lines.insert(b.lines.begin() + b.cy + 1, mid.begin(), mid.end()); b.cy += (int)mid.size(); b.cx = nx;
 }
 static void insCopy(Buffer& b) {
-    if (hasSel(b)) { reg = selText(b); regLine = false; pushClip(reg); setMsg("Copiado"); }
-    else { yankLines(b, b.cy, 1); pushClip(reg + "\n"); setMsg("Linha copiada"); }
+    if (hasSel(b)) { reg = selText(b); regLine = false; pushClip(reg); setMsg("Copied"); }
+    else { yankLines(b, b.cy, 1); pushClip(reg + "\n"); setMsg("Line copied"); }
 }
 static void insCut(Buffer& b) {
-    if (hasSel(b)) { string t = selText(b); beginEdit(b, 3); reg = t; regLine = false; pushClip(t); setMsg("Recortado"); }
-    else { string t = b.lines[b.cy]; beginEdit(b, 3); delLines(b, b.cy, 1); pushClip(t + "\n"); setMsg("Linha recortada"); }
+    if (hasSel(b)) { string t = selText(b); beginEdit(b, 3); reg = t; regLine = false; pushClip(t); setMsg("Cut"); }
+    else { string t = b.lines[b.cy]; beginEdit(b, 3); delLines(b, b.cy, 1); pushClip(t + "\n"); setMsg("Line cut"); }
     pop.on = false; setWant(b);
 }
 static void insPaste(Buffer& b) {
     string t; bool line = false; pasteSource(t, line);
-    if (t.empty()) { setMsg("Área de transferência vazia", true); return; }
+    if (t.empty()) { setMsg("Clipboard is empty", true); return; }
     beginEdit(b, 3); pop.on = false;
     if (line) { vector<string> parts = splitLines(t); b.lines.insert(b.lines.begin() + b.cy, parts.begin(), parts.end()); b.cy += (int)parts.size(); }  // linha inteira entra acima da atual
     else insPasteText(b, t);
@@ -689,6 +690,16 @@ static void scanLine(const string& s, bool& inb, vector<uint8_t>* out) {
             else { size_t q = j; while (q < n && s[q] == ' ') q++; if (q < n && s[q] == '(') k = S_FN; }
             setr(i, j, k); i = j; continue;
         }
+        {   // operadores de comparação e lógicos: == != <= >= < > && ||
+            char d = i + 1 < n ? s[i + 1] : 0; size_t len = 0;
+            if (c == '-' && d == '>') { i += 2; continue; }                                   // seta ->
+            if ((c == '<' || c == '>') && d == c) { i += (i + 2 < n && s[i + 2] == '=') ? 3 : 2; continue; }  // << >> <<= >>=
+            if (c == '=' && d == '=') len = 2;
+            else if ((c == '!' || c == '<' || c == '>') && d == '=') len = 2;
+            else if ((c == '&' || c == '|') && d == c) len = 2;
+            else if (c == '<' || c == '>') len = 1;
+            if (len) { setr(i, i + len, S_OP); i += len; continue; }
+        }
         i++;
     }
 }
@@ -735,21 +746,21 @@ static string selectedDir() {
 }
 static string treeLabel() { string n = pstr(toPath(root).filename()); return n.empty() ? root : n; }  // "C:\" não tem filename
 static string relToRoot(const string& base) {
-    if (samePath(base, root)) return "(raiz do projeto)";
+    if (samePath(base, root)) return "(project root)";
     string r = base.substr(std::min(base.size(), root.size())); while (!r.empty() && (r[0] == '/' || r[0] == '\\')) r.erase(0, 1);
-    return r.empty() ? "(raiz do projeto)" : r;
+    return r.empty() ? "(project root)" : r;
 }
 
 // ============================================================ arquivos / projeto
 static bool openFile(const string& p, int line = 0, int col = 0) {
     std::error_code ec; fs::path fpth = toPath(p);
-    if (!fs::is_regular_file(fpth, ec)) { setMsg("Não é um arquivo: " + p, true); return false; }
+    if (!fs::is_regular_file(fpth, ec)) { setMsg("Not a file: " + p, true); return false; }
     for (int i = 0; i < (int)bufs.size(); i++) if (samePath(bufs[i].path, p)) { cur = i; goto place; }
     {
-        if (fs::file_size(fpth, ec) > 20u * 1024 * 1024) { setMsg("Arquivo grande demais (>20MB)", true); return false; }
-        std::ifstream f(fpth, std::ios::binary); if (!f) { setMsg("Não foi possível abrir: " + p, true); return false; }
+        if (fs::file_size(fpth, ec) > 20u * 1024 * 1024) { setMsg("File too large (>20MB)", true); return false; }
+        std::ifstream f(fpth, std::ios::binary); if (!f) { setMsg("Could not open: " + p, true); return false; }
         char probe[4096]; f.read(probe, sizeof probe); size_t got = (size_t)f.gcount();
-        if (memchr(probe, 0, got)) { setMsg("Arquivo binário — não aberto", true); return false; }
+        if (memchr(probe, 0, got)) { setMsg("Binary file — not opened", true); return false; }
         f.clear(); f.seekg(0);
         Buffer b; b.path = p; b.lines.clear(); string l; size_t ncr = 0;
         while (std::getline(f, l)) { if (!l.empty() && l.back() == '\r') { l.pop_back(); ncr++; } b.lines.push_back(l); }
@@ -825,7 +836,7 @@ static void runnerPoll() {
     if (runner.eof) {
         unsigned long code = 259;
         if (!wProc || !GetExitCodeProcess(wProc, &code)) code = 1;
-        if (code != 259) { if (wProc) CloseHandle(wProc); wProc = nullptr; runner.running = false; outPush("■ finalizado (código " + std::to_string((long)code) + ")"); }
+        if (code != 259) { if (wProc) CloseHandle(wProc); wProc = nullptr; runner.running = false; outPush("■ finished (code " + std::to_string((long)code) + ")"); }
     }
 }
 static void runnerStop() {
@@ -867,7 +878,7 @@ static void runnerPoll() {
         int st = 0; pid_t r = waitpid(runner.pid, &st, WNOHANG);
         if (r == runner.pid) {
             int code = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st); runner.running = false;
-            outPush("■ finalizado (código " + std::to_string(code) + ")");
+            outPush("■ finished (code " + std::to_string(code) + ")");
         }
     }
 }
@@ -880,9 +891,9 @@ static const bool kForceTerminal = false;
 static void saveAll() { for (auto& b : bufs) if (b.dirty) saveBuffer(b); }
 static void startRun(bool rel) {
     if (root.empty()) return;
-    if (runner.running) { setMsg("Já está rodando — use o botão Parar (F7)", true); return; }
+    if (runner.running) { setMsg("Already running — use the Stop button (F7)", true); return; }
     saveAll(); string cmd = rel ? cfg.release : cfg.run;
-    if (cmd.empty()) { setMsg("Comando vazio — configure em Projeto > Configurar execução (F9)", true); return; }
+    if (cmd.empty()) { setMsg("Empty command — configure in Project > Configure run (F9)", true); return; }
     if (kForceTerminal || cfg.terminal) {
         def_prog_mode(); endwin();
         printf("\n$ %s\n\n", cmd.c_str()); fflush(stdout);
@@ -891,11 +902,11 @@ static void startRun(bool rel) {
 #else
         int rc = system(("cd '" + root + "' && " + cmd).c_str());
 #endif
-        printf("\n[código %d] Pressione Enter para voltar ao editor...", rc); fflush(stdout); (void)getchar();
+        printf("\n[code %d] Press Enter to return to the editor...", rc); fflush(stdout); (void)getchar();
         reset_prog_mode(); refresh(); clearok(stdscr, TRUE); return;
     }
     outLines.clear(); outScroll = -1; showOut = true; outTitle = cmd; outPush("$ " + cmd);
-    if (!runnerStart(cmd)) setMsg("Falha ao iniciar o processo", true);
+    if (!runnerStart(cmd)) setMsg("Failed to start the process", true);
 }
 static void gotoFilePos(const fs::path& fp, int line, int col) { selectPath(pstr(fp)); openFile(pstr(fp), line, col); }
 static bool jumpFromLine(const string& s) {
@@ -940,20 +951,20 @@ static void drawBox(int y0, int x0, int h, int w, const string& title) {
 struct MItem { string label, key; int act; };
 enum { ACT_OPEN_PROJECT = 1, ACT_NEW_FILE, ACT_NEW_DIR, ACT_SAVE, ACT_SAVE_ALL, ACT_CLOSE, ACT_QUIT, ACT_UNDO, ACT_REDO, ACT_FIND, ACT_FINDNEXT, ACT_GOTO,
        ACT_TREE, ACT_OUT, ACT_RELTOGGLE, ACT_RUN, ACT_RUN_REL, ACT_STOP, ACT_CONFIG, ACT_REFRESH, ACT_RENAME, ACT_DELETE, ACT_DIAG };
-static const char* MENU_TITLES[4] = {"Arquivo", "Editar", "Exibir", "Projeto"};
+static const char* MENU_TITLES[4] = {"File", "Edit", "View", "Project"};
 static vector<MItem> menuItems(int m) {
     switch (m) {
-    case 0: return {{"Abrir projeto...", "Ctrl-O", ACT_OPEN_PROJECT}, {"Novo arquivo...", "Ctrl-N", ACT_NEW_FILE}, {"Nova pasta...", "", ACT_NEW_DIR},
-                {"Salvar", "Ctrl-S", ACT_SAVE}, {"Salvar tudo", "", ACT_SAVE_ALL}, {"Fechar arquivo", "Ctrl-W", ACT_CLOSE}, {"Sair", "Ctrl-Q", ACT_QUIT}};
-    case 1: return {{"Desfazer", "u", ACT_UNDO}, {"Refazer", "Ctrl-R", ACT_REDO}, {"Localizar...", "Ctrl-F", ACT_FIND}, {"Próxima ocorrência", "n", ACT_FINDNEXT}, {"Ir para linha...", "Ctrl-G", ACT_GOTO}};
-    case 2: return {{"Explorer de arquivos", "Ctrl-T", ACT_TREE}, {"Painel de saída", "F8", ACT_OUT}, {string("Modo: ") + (releaseMode ? "Release  (trocar p/ Debug)" : "Debug  (trocar p/ Release)"), "", ACT_RELTOGGLE}, {"Diagnóstico do terminal", "", ACT_DIAG}};
-    default: return {{"Executar", "F5", ACT_RUN}, {"Executar (release)", "F6", ACT_RUN_REL}, {"Parar", "F7", ACT_STOP}, {"Configurar execução...", "F9", ACT_CONFIG}, {"Atualizar explorer", "", ACT_REFRESH}};
+    case 0: return {{"Open project...", "Ctrl-O", ACT_OPEN_PROJECT}, {"New file...", "Ctrl-N", ACT_NEW_FILE}, {"New folder...", "", ACT_NEW_DIR},
+                {"Save", "Ctrl-S", ACT_SAVE}, {"Save all", "", ACT_SAVE_ALL}, {"Close file", "Ctrl-W", ACT_CLOSE}, {"Quit", "Ctrl-Q", ACT_QUIT}};
+    case 1: return {{"Undo", "u", ACT_UNDO}, {"Redo", "Ctrl-R", ACT_REDO}, {"Find...", "Ctrl-F", ACT_FIND}, {"Find next", "n", ACT_FINDNEXT}, {"Go to line...", "Ctrl-G", ACT_GOTO}};
+    case 2: return {{"File explorer", "Ctrl-T", ACT_TREE}, {"Output panel", "F8", ACT_OUT}, {string("Mode: ") + (releaseMode ? "Release  (switch to Debug)" : "Debug  (switch to Release)"), "", ACT_RELTOGGLE}, {"Terminal diagnostics", "", ACT_DIAG}};
+    default: return {{"Run", "F5", ACT_RUN}, {"Run (release)", "F6", ACT_RUN_REL}, {"Stop", "F7", ACT_STOP}, {"Configure run...", "F9", ACT_CONFIG}, {"Refresh explorer", "", ACT_REFRESH}};
     }
 }
 
 static void drawMenuBar() {
     fillRow(0, 0, SW, CP(P_MENU));
-    string bt = runner.running ? " ■ Parar " : (releaseMode ? " ▶ Run · release " : " ▶ Run ");
+    string bt = runner.running ? " ■ Stop " : (releaseMode ? " ▶ Run · release " : " ▶ Run ");
     put(0, 0, bt, CP(runner.running ? P_BTN_STOP : P_BTN) | A_BOLD); btnW = ulen(bt);
     menuHits.clear(); int x = btnW + 1;
     for (int i = 0; i < 4; i++) {
@@ -965,7 +976,7 @@ static void drawMenuBar() {
 }
 static void drawTabs() {
     fillRow(1, 0, SW, CP(P_BAR)); tabHits.clear(); int x = 0;
-    if (bufs.empty()) { put(1, 1, "nenhum arquivo aberto", CP(P_HINTBAR)); return; }
+    if (bufs.empty()) { put(1, 1, "no file open", CP(P_HINTBAR)); return; }
     for (int i = 0; i < (int)bufs.size(); i++) {
         string t = " " + bufs[i].name() + (bufs[i].dirty ? " ●" : "") + " × "; int w = ulen(t); if (x + w > SW) break;
         put(1, x, t, i == cur ? (CP(P_TAB_ACT) | A_BOLD) : CP(P_TAB)); tabHits.push_back({x, x + w, i, x + w - 3}); x += w + 1;
@@ -975,7 +986,7 @@ static void drawTree() {
     fillRect(L.edY, 0, L.outY - L.edY, L.treeW, CP(P_TEXT));
     fillRow(L.edY, 0, L.treeW, CP(P_TREEHDR)); put(L.edY, 0, " ▾ " + treeLabel(), CP(P_TREEHDR) | A_BOLD, L.treeW);
     fillRow(L.edY + 1, 0, L.treeW, CP(P_BAR)); treeBtns.clear();
-    const char* lb[5] = {" +Arq ", " +Pasta ", " Ren ", " Del ", " ↻ "}; int x = 0;
+    const char* lb[5] = {" +File ", " +Dir ", " Ren ", " Del ", " ↻ "}; int x = 0;
     for (int i = 0; i < 5; i++) { int w = ulen(lb[i]); if (x + w > L.treeW) break; put(L.edY + 1, x, lb[i], CP(P_BTNX)); treeBtns.push_back({x, x + w, i, 0}); x += w + 1; }
     int listY = L.edY + 2, rows = std::max(0, L.outY - listY);
     if (treeSel < treeTop) treeTop = treeSel; if (treeSel >= treeTop + rows) treeTop = treeSel - rows + 1; if (treeTop < 0) treeTop = 0;
@@ -1007,7 +1018,7 @@ static void drawEditor() {
     fillRect(L.edY, L.edX, L.edH, L.edW, CP(P_TEXT));
     if (cur < 0) {
         int cy = L.edY + L.edH / 2 - 1;
-        string a = "Nenhum arquivo aberto", b2 = "Escolha um arquivo no explorer (Ctrl-E) ou use  Arquivo > Novo arquivo", c2 = "F10 abre os menus   ·   F5 executa o projeto";
+        string a = "No file open", b2 = "Pick a file in the explorer (Ctrl-E) or use  File > New file", c2 = "F10 opens the menus   ·   F5 runs the project";
         put(cy, L.edX + std::max(0, (L.edW - ulen(a)) / 2), a, CP(P_TITLE) | A_BOLD);
         put(cy + 2, L.edX + std::max(0, (L.edW - ulen(b2)) / 2), b2, CP(P_HINT));
         put(cy + 3, L.edX + std::max(0, (L.edW - ulen(c2)) / 2), c2, CP(P_HINT)); return;
@@ -1037,15 +1048,15 @@ static void drawEditor() {
 }
 static void drawOut() {
     int y0 = L.outY, h = L.outH; fillRow(y0, 0, SW, CP(P_BAR));
-    string t = " SAÍDA  $ " + outTitle + (runner.running ? "   ● rodando" : ""); put(y0, 0, t, CP(P_BAR) | A_BOLD);
-    put(y0, SW - 22, " clique p/ ir ao erro ", CP(P_HINTBAR));
+    string t = " OUTPUT  $ " + outTitle + (runner.running ? "   ● running" : ""); put(y0, 0, t, CP(P_BAR) | A_BOLD);
+    put(y0, SW - 24, " click to jump to error ", CP(P_HINTBAR));
     int rows = h - 1, total = (int)outLines.size();
     int first = outScroll < 0 ? std::max(0, total - rows) : std::min(outScroll, std::max(0, total - rows)); outFirst = first;
     fillRect(y0 + 1, 0, rows, SW, CP(P_TEXT));
     for (int r = 0; r < rows; r++) {
         int i = first + r; if (i >= total) break; const string& s = outLines[i]; chtype attr = CP(P_TEXT);
         string low; for (char c : s) low += (char)tolower((unsigned char)c);
-        if (startsWith(s, "■ finalizado (código 0)")) attr = CP(P_OK) | A_BOLD;
+        if (startsWith(s, "■ finished (code 0)")) attr = CP(P_OK) | A_BOLD;
         else if (startsWith(s, "■")) attr = CP(P_ERR) | A_BOLD;
         else if (startsWith(s, "$ ")) attr = CP(P_TITLE);
         else if (low.find("error") != string::npos || low.find("erro") != string::npos) attr = CP(P_ERR);
@@ -1057,11 +1068,11 @@ static void drawOut() {
 static void drawStatus() {
     fillRow(L.statY, 0, SW, CP(P_BAR)); string ml; int mp = P_MODE_N;
     if (focus == F_TREE) { ml = " EXPLORER "; mp = P_MODE_T; }
-    else if (mode == INSERT) { ml = " INSERIR "; mp = P_MODE_I; } else if (mode == VISUAL) { ml = " VISUAL "; mp = P_MODE_V; }
-    else if (mode == VLINE) { ml = " VISUAL LINHA "; mp = P_MODE_V; } else ml = " NORMAL ";
+    else if (mode == INSERT) { ml = " INSERT "; mp = P_MODE_I; } else if (mode == VISUAL) { ml = " VISUAL "; mp = P_MODE_V; }
+    else if (mode == VLINE) { ml = " VISUAL LINE "; mp = P_MODE_V; } else ml = " NORMAL ";
     put(L.statY, 0, ml, CP(mp) | A_BOLD); int x = ulen(ml) + 1;
     if (cur >= 0) { put(L.statY, x, bufs[cur].name() + (bufs[cur].dirty ? " [+]" : ""), CP(P_BAR)); }
-    if (runner.running) put(L.statY, std::max(x + 24, SW / 2 - 6), "● rodando", CP(P_BAR) | A_BOLD);
+    if (runner.running) put(L.statY, std::max(x + 24, SW / 2 - 6), "● running", CP(P_BAR) | A_BOLD);
     string right = releaseMode ? "release  " : "debug  ";
     if (cur >= 0) { Buffer& b = bufs[cur]; right += "Ln " + std::to_string(b.cy + 1) + "/" + std::to_string(b.lines.size()) + "  Col " + std::to_string(vcolOf(b.lines[b.cy], b.cx) + 1) + "  C++ "; }
     put(L.statY, SW - ulen(right), right, CP(P_BAR));
@@ -1070,10 +1081,10 @@ static void drawMsg() {
     fillRow(L.msgY, 0, SW, CP(P_TEXT));
     if (!msg.empty()) { put(L.msgY, 1, msg, CP(msgErr ? P_ERR : P_OK) | A_BOLD); return; }
     string h;
-    if (focus == F_TREE) h = "Enter abrir · a novo arquivo · A nova pasta · r renomear · d excluir · Esc volta ao editor";
-    else if (mode == INSERT) h = "Esc normal · Ctrl-Z/Y desfazer/refazer · Ctrl-C/X/V copiar/recortar/colar · mouse seleciona · Ctrl-N autocomplete · Ctrl-S salvar";
-    else if (mode == VISUAL || mode == VLINE) h = "y/Ctrl-C copiar · d apagar · > < indentar · Esc cancelar";
-    else h = "i inserir · v visual · dd apagar linha · u desfazer · Ctrl-F buscar · Ctrl-S salvar · F5 executar · F10 menu";
+    if (focus == F_TREE) h = "Enter open · a new file · A new folder · r rename · d delete · Esc back to editor";
+    else if (mode == INSERT) h = "Esc normal · Ctrl-Z/Y undo/redo · Ctrl-C/X/V copy/cut/paste · mouse selects · Ctrl-N autocomplete · Ctrl-S save";
+    else if (mode == VISUAL || mode == VLINE) h = "y/Ctrl-C copy · d delete · > < indent · Esc cancel";
+    else h = "i insert · v visual · dd delete line · u undo · Ctrl-F find · Ctrl-S save · F5 run · F10 menu";
     put(L.msgY, 1, h, CP(P_HINT));
 }
 static void drawMenuDropdown() {
@@ -1100,7 +1111,7 @@ static void drawPopup() {
 }
 static void drawStart() {
     fillRect(0, 0, SH, SW, CP(P_TEXT));
-    int cy = std::max(1, SH / 2 - 8); string t1 = "r s f v i m", t2 = "editor de código modal · tema gruvbox-dark", t3 = "Escolha a pasta do projeto para começar";
+    int cy = std::max(1, SH / 2 - 8); string t1 = "r s f v i m", t2 = "modal code editor · gruvbox-dark theme", t3 = "Pick the project folder to get started";
     put(cy, (SW - ulen(t1)) / 2, t1, CP(P_TITLE) | A_BOLD); put(cy + 1, (SW - ulen(t2)) / 2, t2, CP(P_HINT)); put(cy + 2, (SW - ulen(t3)) / 2, t3, CP(P_HINT));
 }
 static void render() {
@@ -1173,14 +1184,14 @@ static int dialog(const string& title, const string& body, vector<DField>& f, co
 static int msgBox(const string& title, const string& body, const vector<string>& btns) { vector<DField> none; return dialog(title, body, none, btns, 0); }
 
 #ifdef _WIN32
-// Discos disponíveis: {"C:\\", "Disco local"} ...
+// Discos disponíveis: {"C:\\", "Local disk"} ...
 static vector<std::pair<string, string>> listDrives() {
     vector<std::pair<string, string>> v; unsigned long m = GetLogicalDrives();
     for (int i = 0; i < 26; i++) if (m & (1ul << i)) {
-        string r = string(1, (char)('A' + i)) + ":\\"; unsigned t = GetDriveTypeA(r.c_str());
-        const char* n = t == 2 ? "Disco removível" : t == 3 ? "Disco local" : t == 4 ? "Unidade de rede" : t == 5 ? "CD/DVD" : t == 6 ? "Disco RAM" : "Disco";
-        v.push_back({r, n});
-    }
+            string r = string(1, (char)('A' + i)) + ":\\"; unsigned t = GetDriveTypeA(r.c_str());
+            const char* n = t == 2 ? "Removable drive" : t == 3 ? "Local disk" : t == 4 ? "Network drive" : t == 5 ? "CD/DVD" : t == 6 ? "RAM disk" : "Disk";
+            v.push_back({r, n});
+        }
     return v;
 }
 #endif
@@ -1208,17 +1219,17 @@ static bool pickFolder(const string& startDir, string& out) {
                 items.push_back({d.first + "   " + d.second, toPath(d.first), 0});
                 if (!wantDrive.empty() && startsWith(upperA(d.first), upperA(wantDrive))) { sel = (int)items.size() - 1; wantDrive.clear(); }
             }
-            items.push_back({"~  (pasta pessoal)", toPath(homeDir()), 0});
-            items.push_back({".  (pasta atual: " + pstr(fs::current_path(ec)) + ")", fs::current_path(ec), 0});
+            items.push_back({"~  (home folder)", toPath(homeDir()), 0});
+            items.push_back({".  (current folder: " + pstr(fs::current_path(ec)) + ")", fs::current_path(ec), 0});
         } else
 #endif
         {
             if (!isRoot()) items.push_back({"..", curp.parent_path(), 0});
 #ifdef _WIN32
-            else items.push_back({"..  (lista de discos)", fs::path(), 1});
-            items.push_back({"Discos...  (trocar de unidade)", fs::path(), 1});
+            else items.push_back({"..  (drive list)", fs::path(), 1});
+            items.push_back({"Drives...  (switch drive)", fs::path(), 1});
 #endif
-            items.push_back({"~  (pasta pessoal)", toPath(homeDir()), 0});
+            items.push_back({"~  (home folder)", toPath(homeDir()), 0});
             vector<std::pair<string, fs::path>> dirs;
             for (auto& e : listDir(curp)) { std::error_code e2; string nm = pstr(e.path().filename()); if (e.is_directory(e2) && !skipDirName(nm)) dirs.push_back({lowerA(nm), e.path()}); }
             std::sort(dirs.begin(), dirs.end(), [](const std::pair<string, fs::path>& a, const std::pair<string, fs::path>& b) { return a.first < b.first; });
@@ -1227,12 +1238,12 @@ static bool pickFolder(const string& startDir, string& out) {
         if (sel >= (int)items.size()) sel = (int)items.size() - 1; if (sel < 0) sel = 0;
         runnerPoll(); render();
         int w = std::min(SW - 4, 72), h = std::min(SH - 2, 24); int y0 = std::max(0, (SH - h) / 2), x0 = std::max(0, (SW - w) / 2);
-        drawBox(y0, x0, h, w, atDrives ? "Abrir projeto — escolha um disco" : "Abrir projeto — escolha uma pasta");
-        put(y0 + 1, x0 + 2, atDrives ? string("Este computador — discos disponíveis") : tailClip(pstr(curp), w - 4), CP(P_DLGT) | A_BOLD, w - 4);
+        drawBox(y0, x0, h, w, atDrives ? "Open project — choose a drive" : "Open project — choose a folder");
+        put(y0 + 1, x0 + 2, atDrives ? string("This computer — available drives") : tailClip(pstr(curp), w - 4), CP(P_DLGT) | A_BOLD, w - 4);
 #ifdef _WIN32
-        put(y0 + 2, x0 + 2, "↑↓ mover · Enter entra · ← sobe · Ctrl-D discos · letra = disco · Tab", CP(P_DLGB), w - 4);
+        put(y0 + 2, x0 + 2, "↑↓ move · Enter opens · ← up · Ctrl-D drives · letter = drive · Tab", CP(P_DLGB), w - 4);
 #else
-        put(y0 + 2, x0 + 2, "↑↓ mover · Enter/clique entra · ← sobe · Tab botões", CP(P_DLGB), w - 4);
+        put(y0 + 2, x0 + 2, "↑↓ move · Enter/click opens · ← up · Tab buttons", CP(P_DLGB), w - 4);
 #endif
         int ly = y0 + 3, lrows = h - 6; if (lrows < 1) lrows = 1;
         if (sel < top) top = sel; if (sel >= top + lrows) top = sel - lrows + 1;
@@ -1240,7 +1251,7 @@ static bool pickFolder(const string& startDir, string& out) {
             int i = top + r; if (i >= (int)items.size()) break; chtype attr = CP((i == sel && foc == 0) ? P_POPSEL : (i == sel ? P_INPF : P_DLG));
             fillRow(ly + r, x0 + 1, w - 2, attr); put(ly + r, x0 + 2, items[i].label, attr, w - 4);
         }
-        string b1 = atDrives ? "  Entrar no disco  " : "  Abrir esta pasta  ", b2 = "  Cancelar  "; int bx = x0 + 2, by = y0 + h - 2;
+        string b1 = atDrives ? "  Enter drive  " : "  Open this folder  ", b2 = "  Cancel  "; int bx = x0 + 2, by = y0 + h - 2;
         put(by, bx, b1, CP(foc == 1 ? P_POPSEL : P_BTN) | A_BOLD); put(by, bx + ulen(b1) + 2, b2, CP(foc == 2 ? P_POPSEL : P_BTNX) | A_BOLD);
         curs_set(0); refresh(); int ch = readKey(50);
         if (ch == ERR || ch == KEY_RESIZE) continue;
@@ -1418,14 +1429,14 @@ static void insertKey(int ch) {
 static int cnt = 0; static char pend = 0; static int pendN = 1;
 static void moveVert(Buffer& b, int d) { b.cy = std::max(0, std::min((int)b.lines.size() - 1, b.cy + d)); b.cx = cxFromV(b.lines[b.cy], b.want); clampCursor(b); }
 static void doFind() {
-    if (cur < 0) return; vector<DField> f = {{"Buscar por:", lastSearch}};
-    if (dialog("Localizar", "", f, {"Buscar", "Cancelar"}) != 0 || f[0].text.empty()) return;
+    if (cur < 0) return; vector<DField> f = {{"Search for:", lastSearch}};
+    if (dialog("Find", "", f, {"Find", "Cancel"}) != 0 || f[0].text.empty()) return;
     lastSearch = f[0].text; Buffer& b = bufs[cur];
-    if (searchDir(b, lastSearch, true)) { b.top = std::max(0, b.cy - L.edH / 2); setWant(b); focus = F_EDITOR; } else setMsg("Não encontrado: " + lastSearch, true);
+    if (searchDir(b, lastSearch, true)) { b.top = std::max(0, b.cy - L.edH / 2); setWant(b); focus = F_EDITOR; } else setMsg("Not found: " + lastSearch, true);
 }
 static void doGoto() {
-    if (cur < 0) return; vector<DField> f = {{"Número da linha:", ""}};
-    if (dialog("Ir para linha", "Linhas: 1 a " + std::to_string(bufs[cur].lines.size()), f, {"Ir", "Cancelar"}) != 0) return;
+    if (cur < 0) return; vector<DField> f = {{"Line number:", ""}};
+    if (dialog("Go to line", "Lines: 1 to " + std::to_string(bufs[cur].lines.size()), f, {"Go", "Cancel"}) != 0) return;
     int n = atoi(f[0].text.c_str()); if (n < 1) return; Buffer& b = bufs[cur]; b.cy = std::min(n - 1, (int)b.lines.size() - 1); b.cx = firstNonBlank(b.lines[b.cy]);
     clampCursor(b); b.top = std::max(0, b.cy - L.edH / 2); setWant(b); focus = F_EDITOR;
 }
@@ -1446,7 +1457,7 @@ static bool motionKey(Buffer& b, int ch, int n, bool hadCount) {
     case '}': { int y = b.cy; while (y + 1 < (int)b.lines.size() && b.lines[y].empty()) y++; while (y + 1 < (int)b.lines.size() && !b.lines[y].empty()) y++; b.cy = y; b.cx = 0; setWant(b); return true; }
     case '{': { int y = b.cy; while (y > 0 && b.lines[y].empty()) y--; while (y > 0 && !b.lines[y].empty()) y--; b.cy = y; b.cx = 0; setWant(b); return true; }
     case '%': matchBracket(b); setWant(b); return true;
-    case 'n': case 'N': if (lastSearch.empty()) { setMsg("Use Ctrl-F para buscar", true); return true; } if (!searchDir(b, lastSearch, ch == 'n')) setMsg("Não encontrado: " + lastSearch, true); setWant(b); return true;
+    case 'n': case 'N': if (lastSearch.empty()) { setMsg("Use Ctrl-F to search", true); return true; } if (!searchDir(b, lastSearch, ch == 'n')) setMsg("Not found: " + lastSearch, true); setWant(b); return true;
     case 4: moveVert(b, L.edH / 2); return true;
     case 21: moveVert(b, -L.edH / 2); return true;
     case KEY_NPAGE: moveVert(b, L.edH); return true;
@@ -1477,7 +1488,7 @@ static void pendCmd(Buffer& b, char p, int ch, int n) {
         else if (ch == '$') { snap(b); opRange(b, b.cx, (int)l.size(), 0); } else if (ch == '0') { snap(b); opRange(b, 0, b.cx, 0); }
         break;
     case 'y':
-        if (ch == 'y') { yankLines(b, b.cy, n); setMsg(std::to_string(std::min(n, (int)b.lines.size() - b.cy)) + " linha(s) copiada(s)"); }
+        if (ch == 'y') { yankLines(b, b.cy, n); setMsg(std::to_string(std::min(n, (int)b.lines.size() - b.cy)) + " line(s) copied"); }
         else if (ch == 'w') opRange(b, b.cx, endW(l, b.cx, n, false), 1); else if (ch == '$') opRange(b, b.cx, (int)l.size(), 1);
         break;
     case 'c':
@@ -1547,7 +1558,7 @@ static void visualKey(int ch) {
     case 'y':
         if (mode == VLINE) yankLines(b, y1, y2 - y1 + 1); else { reg = getRange(b, y1, x1, y2, x2e); regLine = false; }
         pushClip(regLine ? reg + "\n" : reg);
-        b.cy = y1; b.cx = mode == VLINE ? b.cx : x1; mode = NORMAL; clampCursor(b); setMsg("Copiado"); break;
+        b.cy = y1; b.cx = mode == VLINE ? b.cx : x1; mode = NORMAL; clampCursor(b); setMsg("Copied"); break;
     case 'd': case 'x': case 'c': {
         snap(b);
         if (mode == VLINE) { delLines(b, y1, y2 - y1 + 1); if (ch == 'c') { b.lines.insert(b.lines.begin() + b.cy, ""); b.cx = 0; mode = INSERT; break; } }
@@ -1563,35 +1574,35 @@ static void visualKey(int ch) {
 static bool confirmDiscard(const string& what) {
     vector<string> d; for (auto& b : bufs) if (b.dirty) d.push_back(b.name());
     if (d.empty()) return true;
-    string body = "Arquivos com alterações não salvas:\n"; for (auto& n : d) body += "  • " + n + "\n";
-    int r = msgBox(what, body, {"Salvar tudo", "Descartar", "Cancelar"});
+    string body = "Files with unsaved changes:\n"; for (auto& n : d) body += "  • " + n + "\n";
+    int r = msgBox(what, body, {"Save all", "Discard", "Cancel"});
     if (r == 0) { saveAll(); return true; } return r == 1;
 }
 static void closeBuffer(int i) {
     if (i < 0 || i >= (int)bufs.size()) return;
     if (bufs[i].dirty) {
-        int r = msgBox("Fechar arquivo", "Salvar alterações em " + bufs[i].name() + "?", {"Salvar", "Descartar", "Cancelar"});
+        int r = msgBox("Close file", "Save changes to " + bufs[i].name() + "?", {"Save", "Discard", "Cancel"});
         if (r == 0) saveBuffer(bufs[i]); else if (r != 1) return;
     }
     bufs.erase(bufs.begin() + i); if (bufs.empty()) { cur = -1; focus = F_TREE; } else cur = std::min(cur >= i && cur > 0 ? cur - 1 : cur, (int)bufs.size() - 1);
     mode = NORMAL; pop.on = false;
 }
 static void doNewEntry(bool dir) {
-    string base = selectedDir(); vector<DField> f = {{dir ? "Nome da nova pasta:" : "Nome do novo arquivo:", ""}};
+    string base = selectedDir(); vector<DField> f = {{dir ? "New folder name:" : "New file name:", ""}};
     string rel = relToRoot(base);
-    if (dialog(dir ? "Nova pasta" : "Novo arquivo", "Em: " + rel, f, {"Criar", "Cancelar"}) != 0 || f[0].text.empty()) return;
+    if (dialog(dir ? "New folder" : "New file", "In: " + rel, f, {"Create", "Cancel"}) != 0 || f[0].text.empty()) return;
     fs::path np = toPath(base) / toPath(f[0].text); std::error_code ec;
-    if (fs::exists(np, ec)) { setMsg("Já existe: " + f[0].text, true); return; }
+    if (fs::exists(np, ec)) { setMsg("Already exists: " + f[0].text, true); return; }
     if (dir) fs::create_directories(np, ec);
-    else { fs::create_directories(np.parent_path(), ec); if (!ec) { std::ofstream o(np, std::ios::binary); if (!o) { setMsg("Erro ao criar " + f[0].text, true); return; } } }
-    if (ec) { setMsg("Erro: " + ec.message(), true); return; }
-    selectPath(pstr(np)); if (!dir) openFile(pstr(np)); setMsg((dir ? "Pasta criada: " : "Arquivo criado: ") + f[0].text);
+    else { fs::create_directories(np.parent_path(), ec); if (!ec) { std::ofstream o(np, std::ios::binary); if (!o) { setMsg("Error creating " + f[0].text, true); return; } } }
+    if (ec) { setMsg("Error: " + ec.message(), true); return; }
+    selectPath(pstr(np)); if (!dir) openFile(pstr(np)); setMsg((dir ? "Folder created: " : "File created: ") + f[0].text);
 }
 static void doRename() {
     if (treeSel < 0 || treeSel >= (int)tree.size()) return; TreeNode n = tree[treeSel];
-    vector<DField> f = {{"Novo nome:", n.name}}; if (dialog("Renomear", "", f, {"Renomear", "Cancelar"}) != 0 || f[0].text.empty() || f[0].text == n.name) return;
+    vector<DField> f = {{"New name:", n.name}}; if (dialog("Rename", "", f, {"Rename", "Cancel"}) != 0 || f[0].text.empty() || f[0].text == n.name) return;
     fs::path np = toPath(n.path).parent_path() / toPath(f[0].text); std::error_code ec; fs::rename(toPath(n.path), np, ec);
-    if (ec) { setMsg("Erro: " + ec.message(), true); return; }
+    if (ec) { setMsg("Error: " + ec.message(), true); return; }
     string nps = pstr(np), nk = pathKey(n.path) + SEP;
     for (auto& b : bufs) if (samePath(b.path, n.path)) b.path = nps; else if (n.dir && startsWith(pathKey(b.path), nk)) b.path = nps + b.path.substr(n.path.size());
     if (n.dir && isExp(n.path)) { setExp(n.path, false); setExp(nps, true); }
@@ -1599,21 +1610,21 @@ static void doRename() {
 }
 static void doDelete() {
     if (treeSel < 0 || treeSel >= (int)tree.size()) return; TreeNode n = tree[treeSel];
-    if (msgBox("Excluir", "Excluir " + string(n.dir ? "a pasta '" : "o arquivo '") + n.name + "'?\nEsta ação não pode ser desfeita.", {"Excluir", "Cancelar"}) != 0) return;
-    std::error_code ec; fs::remove_all(toPath(n.path), ec); if (ec) { setMsg("Erro: " + ec.message(), true); return; }
+    if (msgBox("Delete", "Delete " + string(n.dir ? "the folder '" : "the file '") + n.name + "'?\nThis action cannot be undone.", {"Delete", "Cancel"}) != 0) return;
+    std::error_code ec; fs::remove_all(toPath(n.path), ec); if (ec) { setMsg("Error: " + ec.message(), true); return; }
     for (int i = (int)bufs.size() - 1; i >= 0; i--) if (samePath(bufs[i].path, n.path) || (n.dir && startsWith(pathKey(bufs[i].path), pathKey(n.path) + SEP))) { bufs[i].dirty = false; closeBuffer(i); }
-    refreshTree(); setMsg("Excluído: " + n.name);
+    refreshTree(); setMsg("Deleted: " + n.name);
 }
 static void doConfig() {
-    vector<DField> f = {{"Comando Run (botão azul / F5):", cfg.run}, {"Comando Release (F6 / modo release):", cfg.release}, {"Rodar em terminal completo (programas interativos)", "", true, cfg.terminal}};
+    vector<DField> f = {{"Run command (blue button / F5):", cfg.run}, {"Release command (F6 / release mode):", cfg.release}, {"Run in full terminal (interactive programs)", "", true, cfg.terminal}};
     for (;;) {
-        int r = dialog("Configurar execução", "Executado na pasta do projeto. Padrão: rsfmake run  /  rsfmake run -r", f, {"Salvar", "Padrão", "Cancelar"});
+        int r = dialog("Configure run", "Runs in the project folder. Default: rsfmake run  /  rsfmake run -r", f, {"Save", "Default", "Cancel"});
         if (r == 1) { f[0].text = "rsfmake run"; f[1].text = "rsfmake run -r"; f[2].check = false; continue; }
-        if (r != 0) return; cfg.run = f[0].text; cfg.release = f[1].text; cfg.terminal = f[2].check; saveConfig(); setMsg("Configuração salva em .vimple.conf"); return;
+        if (r != 0) return; cfg.run = f[0].text; cfg.release = f[1].text; cfg.terminal = f[2].check; saveConfig(); setMsg("Settings saved to .vimple.conf"); return;
     }
 }
 static void doOpenProject() {
-    if (!root.empty() && !confirmDiscard("Abrir outro projeto")) return;
+    if (!root.empty() && !confirmDiscard("Open another project")) return;
     string path; std::error_code ecc; string start = root.empty() ? pstr(fs::current_path(ecc)) : pstr(toPath(root).parent_path());
     if (pickFolder(start, path)) { if (runner.running) { runnerStop(); } openProject(path); }
 }
@@ -1624,29 +1635,29 @@ static void doDiag() {
     long nPress = 0, nRel = 0, nClick = 0, nMove = 0, nWheel = 0, nOther = 0; unsigned long seen = 0;
     for (;;) {
         layout(); erase(); fillRect(0, 0, SH, SW, CP(P_TEXT)); int y = 0; char t[200];
-        put(y++, 1, "DIAGNÓSTICO — q/Esc sai. Mova o mouse, clique, ARRASTE e role a roda aqui dentro.", CP(P_TITLE) | A_BOLD);
+        put(y++, 1, "DIAGNOSTICS — q/Esc exits. Move the mouse, click, DRAG and scroll the wheel in here.", CP(P_TITLE) | A_BOLD);
         const char* ver = curses_version();
-        put(y++, 1, string("Biblioteca: ") + (ver ? ver : "?"), CP(P_TEXT));
-        snprintf(t, sizeof t, "COLORS=%d  COLOR_PAIRS=%d  redefinir cores=%s  modo16=%s", COLORS, COLOR_PAIRS, can_change_color() ? "sim" : "nao", pal16 ? "sim" : "nao");
+        put(y++, 1, string("Library: ") + (ver ? ver : "?"), CP(P_TEXT));
+        snprintf(t, sizeof t, "COLORS=%d  COLOR_PAIRS=%d  can redefine colors=%s  mode16=%s", COLORS, COLOR_PAIRS, can_change_color() ? "yes" : "no", pal16 ? "yes" : "no");
         put(y++, 1, t, CP(P_TEXT));
-        snprintf(t, sizeof t, "Pares: limite=%d  usados=%d  falhas=%d", diagPairLim, diagPairUsed, diagPairFail);
+        snprintf(t, sizeof t, "Pairs: limit=%d  used=%d  failures=%d", diagPairLim, diagPairUsed, diagPairFail);
         put(y++, 1, t, CP(P_TEXT)); y++;
-        put(y++, 1, "Amostras (cada palavra deve ter uma cor diferente):", CP(P_HINT));
-        const char* nm[8] = {"texto", "kw", "tipo", "str", "num", "coment", "pre", "func"};
+        put(y++, 1, "Samples (each word should have a different color):", CP(P_HINT));
+        const char* nm[9] = {"text", "kw", "type", "str", "num", "comment", "pre", "func", "op"};
         put(y, 1, "A", CP(P_HINT)); int x = 4;
-        for (int k = 0; k < 8; k++) { attrset(CP(P_SYN + k)); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
+        for (int k = 0; k < 9; k++) { attrset(CP(P_SYN + k)); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
         y++; put(y, 1, "B", CP(P_HINT)); x = 4;  // mesma coisa, mas escolhendo o par com color_set() em vez de COLOR_PAIR()
-        for (int k = 0; k < 8; k++) { attrset(A_NORMAL); color_set((short)PM[P_SYN + k], nullptr); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
+        for (int k = 0; k < 9; k++) { attrset(A_NORMAL); color_set((short)PM[P_SYN + k], nullptr); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
         attrset(A_NORMAL); color_set((short)PM[P_TEXT], nullptr); y++;
-        put(y, 1, "C", CP(P_HINT)); put(y, 4, " INSERIR ", CP(P_MODE_I) | A_BOLD); put(y, 14, " ▶ Run ", CP(P_BTN) | A_BOLD); put(y, 22, "pasta/", CP(P_DIR) | A_BOLD);
-        put(y, 30, "erro", CP(P_ERR)); put(y, 36, "aviso", CP(P_WARN)); put(y, 43, "ok", CP(P_OK)); y += 2;
-        string pc = "Pares gravados (id:fg/bg): ";
-        for (int k = 0; k < 8; k++) { short f = -1, b = -1; pair_content((short)PM[P_SYN + k], &f, &b); snprintf(t, sizeof t, "%d:%d/%d ", PM[P_SYN + k], f, b); pc += t; }
+        put(y, 1, "C", CP(P_HINT)); put(y, 4, " INSERT ", CP(P_MODE_I) | A_BOLD); put(y, 14, " ▶ Run ", CP(P_BTN) | A_BOLD); put(y, 22, "folder/", CP(P_DIR) | A_BOLD);
+        put(y, 30, "error", CP(P_ERR)); put(y, 36, "warn", CP(P_WARN)); put(y, 43, "ok", CP(P_OK)); y += 2;
+        string pc = "Stored pairs (id:fg/bg): ";
+        for (int k = 0; k < 9; k++) { short f = -1, b = -1; pair_content((short)PM[P_SYN + k], &f, &b); snprintf(t, sizeof t, "%d:%d/%d ", PM[P_SYN + k], f, b); pc += t; }
         put(y++, 1, pc, CP(P_TEXT)); y++;
-        snprintf(t, sizeof t, "Aqui: press=%ld release=%ld click=%ld movimento=%ld roda=%ld outros=%ld  bits vistos=0x%lx", nPress, nRel, nClick, nMove, nWheel, nOther, seen);
+        snprintf(t, sizeof t, "Here: press=%ld release=%ld click=%ld motion=%ld wheel=%ld other=%ld  bits seen=0x%lx", nPress, nRel, nClick, nMove, nWheel, nOther, seen);
         put(y++, 1, t, CP(P_TEXT));
-        put(y++, 1, "(teste: 1 clique; depois segure o botão e arraste; depois role a roda)", CP(P_HINT));
-        put(y++, 1, "Últimos eventos aqui (bstate em hexadecimal):", CP(P_HINT));
+        put(y++, 1, "(test: 1 click; then hold the button and drag; then scroll the wheel)", CP(P_HINT));
+        put(y++, 1, "Latest events here (bstate in hexadecimal):", CP(P_HINT));
         for (auto& l : diagLog) put(y++, 3, l, CP(P_TEXT));
         refresh();
         int ch = readKey(-1); if (ch == ERR || ch == KEY_RESIZE) continue;
@@ -1660,8 +1671,8 @@ static void doDiag() {
                 if (b == 0) nOther++;
                 snprintf(t, sizeof t, "MOUSE bstate=0x%lx  x=%d y=%d", b, ev.x, ev.y); diagAdd(t);
             }
-            else diagAdd("MOUSE (getmouse falhou)");
-        } else { snprintf(t, sizeof t, "TECLA %d", ch); diagAdd(t); }
+            else diagAdd("MOUSE (getmouse failed)");
+        } else { snprintf(t, sizeof t, "KEY %d", ch); diagAdd(t); }
     }
     clearok(stdscr, TRUE);
 }
@@ -1671,18 +1682,18 @@ static void doAction(int a) {
     case ACT_OPEN_PROJECT: doOpenProject(); break;
     case ACT_NEW_FILE: doNewEntry(false); break;
     case ACT_NEW_DIR: doNewEntry(true); break;
-    case ACT_SAVE: if (cur >= 0 && saveBuffer(bufs[cur])) setMsg("Salvo: " + bufs[cur].name()); break;
-    case ACT_SAVE_ALL: saveAll(); setMsg("Todos os arquivos salvos"); break;
+    case ACT_SAVE: if (cur >= 0 && saveBuffer(bufs[cur])) setMsg("Saved: " + bufs[cur].name()); break;
+    case ACT_SAVE_ALL: saveAll(); setMsg("All files saved"); break;
     case ACT_CLOSE: closeBuffer(cur); break;
-    case ACT_QUIT: if (confirmDiscard("Sair")) quitting = true; break;
+    case ACT_QUIT: if (confirmDiscard("Quit")) quitting = true; break;
     case ACT_UNDO: doUndo(); break;
     case ACT_REDO: doRedo(); break;
     case ACT_FIND: doFind(); break;
-    case ACT_FINDNEXT: if (cur >= 0) { if (lastSearch.empty()) doFind(); else if (!searchDir(bufs[cur], lastSearch, true)) setMsg("Não encontrado", true); } break;
+    case ACT_FINDNEXT: if (cur >= 0) { if (lastSearch.empty()) doFind(); else if (!searchDir(bufs[cur], lastSearch, true)) setMsg("Not found", true); } break;
     case ACT_GOTO: doGoto(); break;
     case ACT_TREE: showTree = !showTree; if (!showTree) focus = F_EDITOR; else if (cur < 0) focus = F_TREE; break;
     case ACT_OUT: showOut = !showOut; break;
-    case ACT_RELTOGGLE: releaseMode = !releaseMode; setMsg(releaseMode ? "Modo release: o botão Run usa o comando release" : "Modo debug: o botão Run usa o comando padrão"); break;
+    case ACT_RELTOGGLE: releaseMode = !releaseMode; setMsg(releaseMode ? "Release mode: the Run button uses the release command" : "Debug mode: the Run button uses the default command"); break;
     case ACT_RUN: startRun(false); break;
     case ACT_RUN_REL: startRun(true); break;
     case ACT_STOP: if (runner.running) runnerStop(); break;
@@ -1755,7 +1766,7 @@ static void handleMouse() {
         int i = treeTop + (y - (L.edY + 2)); if (y >= L.edY + 2 && i >= 0 && i < (int)tree.size()) { treeSel = i; focus = F_TREE; treeActivate(); }
         return;
     }
-    if (showOut && y > L.outY && y < L.statY) { int i = outFirst + (y - L.outY - 1); if (i >= 0 && i < (int)outLines.size()) { if (!jumpFromLine(outLines[i])) setMsg("Linha sem referência de arquivo:linha", true); } return; }
+    if (showOut && y > L.outY && y < L.statY) { int i = outFirst + (y - L.outY - 1); if (i >= 0 && i < (int)outLines.size()) { if (!jumpFromLine(outLines[i])) setMsg("Line has no file:line reference", true); } return; }
     if (y >= L.edY && y < L.outY && x >= L.edX && cur >= 0) {
         Buffer& b = bufs[cur]; focus = F_EDITOR; pop.on = false;
         mouseToCursor(b, x, y); insKind = 0;
@@ -1807,9 +1818,9 @@ static void handleKey(int ch) {
 
 // ============================================================ main
 #ifdef _WIN32
-  #define MOUSE_OFF
+#define MOUSE_OFF
 #else
-  #define MOUSE_OFF fputs("\033[?1002l", stdout);
+#define MOUSE_OFF fputs("\033[?1002l", stdout);
 #endif
 #ifdef _WIN32
 static unsigned oldOutCP = 0, oldInCP = 0;
@@ -1825,9 +1836,9 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
     if (!setlocale(LC_ALL, ".UTF-8")) setlocale(LC_ALL, "");  // UTF-8: acentos, ▾ ● ■ etc. (com a locale ANSI padrão viram lixo)
     oldOutCP = GetConsoleOutputCP(); oldInCP = GetConsoleCP();
-  #ifdef PDC_WIDE
+#ifdef PDC_WIDE
     SetConsoleOutputCP(65001); SetConsoleCP(65001);
-  #endif
+#endif
 #else
     setlocale(LC_ALL, "");
     signal(SIGPIPE, SIG_IGN); setenv("ESCDELAY", "25", 0);
@@ -1846,9 +1857,9 @@ int main(int argc, char** argv) {
     if (!has_colors() || COLORS < minColors) {
         endwin();
 #ifdef _WIN32
-        fprintf(stderr, "vimple precisa de um console com cores (Windows Terminal ou conhost).\n");
+        fprintf(stderr, "vimple needs a console with colors (Windows Terminal or conhost).\n");
 #else
-        fprintf(stderr, "vimple precisa de terminal com 256 cores (use TERM=xterm-256color).\n");
+        fprintf(stderr, "vimple needs a 256-color terminal (use TERM=xterm-256color).\n");
 #endif
         return 1;
     }
