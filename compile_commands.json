@@ -1,0 +1,8 @@
+[
+{
+  "directory": "/media/meunvme/PROGRAMACAO/C++/App/rsfvim/bin/build_temp/linux+debug/build",
+  "command": "/usr/bin/c++ -I/media/meunvme/PROGRAMACAO/C++/App/rsfvim/include -I/media/meunvme/PROGRAMACAO/C++/App/rsfvim/src -isystem /media/meunvme/PROGRAMACAO/C++/App/rsfvim/redist/linux/x64/include -g -std=c++20 -finput-charset=UTF-8 -fexec-charset=UTF-8 -o CMakeFiles/rsfvim.dir/media/meunvme/PROGRAMACAO/C++/App/rsfvim/src/main.cpp.o -c /media/meunvme/PROGRAMACAO/C++/App/rsfvim/src/main.cpp",
+  "file": "/media/meunvme/PROGRAMACAO/C++/App/rsfvim/src/main.cpp",
+  "output": "/media/meunvme/PROGRAMACAO/C++/App/rsfvim/bin/build_temp/linux+debug/build/CMakeFiles/rsfvim.dir/media/meunvme/PROGRAMACAO/C++/App/rsfvim/src/main.cpp.o"
+}
+]

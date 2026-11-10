@@ -1,0 +1,10 @@
+[package]
+name = "rsfvim"
+version = "0.1.0"
+type = "exe"
+std = 20
+sources = ["src/*.cpp"]
+
+[dependencies]
+# libraries from the registry
+ncurses = "*"
