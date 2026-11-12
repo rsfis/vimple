@@ -1,6 +1,9 @@
 // vimple - editor de código modal (estilo vim) para terminal, tema gruvbox-dark.
 // Toda a interação "de programa" é por UI (menus, diálogos, botões, mouse).
 // Dentro do arquivo a edição é modal: hjkl, i, v, dd, yy, p, u ...
+// Recursos: LSP (clangd) · divisão de tela (F3 / botões / menu View) · terminal embutido (F4) · sessão lembrada por projeto.
+// Compilar (Linux):   g++ -std=c++17 -O2 main.cpp -o vimple -lncursesw
+// Windows: PDCurses(Mod) com wide + UTF-8; o terminal embutido usa ConPTY (Windows 10 1809+), o LSP usa pipes.
 // ---- curses: ncurses (Linux/macOS) ou PDCurses/PDCursesMod (Windows)
 #ifdef _WIN32
 #ifndef _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING
@@ -32,6 +35,7 @@ typedef int pid_t;
 #define SEP "\\"
 #else
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #define SEP "/"
@@ -39,6 +43,8 @@ typedef int pid_t;
 
 #include <algorithm>
 #include <cerrno>
+#include <array>
+#include <chrono>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
@@ -69,6 +75,7 @@ struct W32_SA { unsigned long n; void* sd; int inherit; };
 struct W32_SI { unsigned long cb; wchar_t* res; wchar_t* desk; wchar_t* title; unsigned long x, y, xs, ys, xc, yc, fill, flags;
     unsigned short show, cbres2; unsigned char* res2; void* in; void* out; void* err; };
 struct W32_PI { void* proc; void* thr; unsigned long pid, tid; };
+struct W32_SIX { W32_SI si; void* attr; };  // STARTUPINFOEXW
 extern "C" {
 __declspec(dllimport) unsigned long __stdcall GetLogicalDrives(void);
 __declspec(dllimport) unsigned int __stdcall GetDriveTypeA(const char*);
@@ -91,6 +98,12 @@ __declspec(dllimport) void* __stdcall GetStdHandle(unsigned long);
 __declspec(dllimport) int __stdcall GetConsoleMode(void*, unsigned long*);
 __declspec(dllimport) int __stdcall SetConsoleMode(void*, unsigned long);
 __declspec(dllimport) int __stdcall TerminateProcess(void*, unsigned int);
+__declspec(dllimport) int __stdcall WriteFile(void*, const void*, unsigned long, unsigned long*, void*);
+__declspec(dllimport) void* __stdcall GetModuleHandleA(const char*);
+__declspec(dllimport) void* __stdcall GetProcAddress(void*, const char*);
+__declspec(dllimport) int __stdcall InitializeProcThreadAttributeList(void*, unsigned long, unsigned long, size_t*);
+__declspec(dllimport) int __stdcall UpdateProcThreadAttribute(void*, unsigned long, size_t, void*, size_t, void*, size_t*);
+__declspec(dllimport) void __stdcall DeleteProcThreadAttributeList(void*);
 __declspec(dllimport) void* __stdcall GlobalAlloc(unsigned int, size_t);
 __declspec(dllimport) void* __stdcall GlobalLock(void*);
 __declspec(dllimport) int __stdcall GlobalUnlock(void*);
@@ -228,7 +241,7 @@ static int diagPairFail = 0, diagPairLim = 0, diagPairUsed = 0;
 #define CP(n) COLOR_PAIR(PM[(n)])
 enum { P_TEXT = 1, P_BAR, P_SEL, P_LINENO, P_LINENO_CUR, P_BTN, P_BTN_STOP, P_MENU, P_MENU_ACT, P_TAB, P_TAB_ACT, P_MODE_N, P_MODE_I, P_MODE_V, P_MODE_T,
        P_POP, P_POPSEL, P_DIR, P_ERR, P_WARN, P_NOTE, P_OK, P_GRAY, P_SIDE_SEL, P_SIDE_SELF, P_DLG, P_DLGB, P_DLGT, P_INP, P_INPF, P_BTNX,
-       P_HINT, P_TITLE, P_SEP, P_HINTBAR, P_TREEHDR, P_SYN = 40 };
+       P_HINT, P_TITLE, P_SEP, P_HINTBAR, P_TREEHDR, P_SYN = 40, P_TERM = 70 };
 enum { S_TEXT, S_KW, S_TYPE, S_STR, S_NUM, S_COM, S_PRE, S_FN, S_OP };
 
 // Console de 16 cores (PDCurses clássico / conhost): usa os 16 slots da paleta (redefinidos se possível).
@@ -283,9 +296,11 @@ static void initTheme() {
     P(P_NOTE, K_AQU, K_BG0); P(P_OK, K_GRN, K_BG0); P(P_GRAY, K_GRY, K_BG0); P(P_SIDE_SEL, K_FG, K_BG2); P(P_SIDE_SELF, K_BG0, K_BLU);
     P(P_DLG, K_FG, K_BG1); P(P_DLGB, K_LGR, K_BG1); P(P_DLGT, K_YEL, K_BG1); P(P_INP, K_FG, K_BG0); P(P_INPF, K_FG, K_BG2); P(P_BTNX, K_FG, K_BG2);
     P(P_HINT, K_GRY, K_BG0); P(P_TITLE, K_ORG, K_BG0); P(P_SEP, K_BG3, K_BG0); P(P_HINTBAR, K_GRY, K_BG1); P(P_TREEHDR, K_BLU, K_BG1);
+    { int tc[8] = {K_GRY, K_RED, K_GRN, K_YEL, K_BLU, K_PUR, K_AQU, K_FG}; for (int i = 0; i < 8; i++) P(P_TERM + i, tc[i], K_BG0); }  // terminal embutido
     for (int i = 0; i < 9; i++) P(P_SYN + 16 + i, syn[i], K_BG1);  // linha atual (por último: é só estético)
     for (int id = 1; id < P_SYN + 16; id++) if (!PM[id]) PM[id] = PM[P_TEXT];
     for (int id = P_SYN + 16; id < P_SYN + 25; id++) if (!PM[id]) PM[id] = PM[id - 16];
+    for (int i = 0; i < 8; i++) if (!PM[P_TERM + i]) PM[P_TERM + i] = PM[P_TEXT];
     diagPairUsed = nextId - 1;
     bkgd(CP(P_TEXT));
 }
@@ -316,23 +331,36 @@ static void buildDict() {
 
 // ============================================================ buffer
 struct Snap { vector<string> lines; int cy, cx; bool dirty; };
+struct Diag { int y1 = 0, x1 = 0, y2 = 0, x2 = 0, sev = 1; string msg; };  // diagnóstico do LSP (colunas em bytes)
 struct Buffer {
     string path; vector<string> lines{""}; bool dirty = false, crlf = false, bom = false;  // crlf/bom: preservados ao salvar
     int cy = 0, cx = 0, top = 0, left = 0, want = 0;
     vector<Snap> undo, redo;
+    vector<Diag> diags; int lspVer = 0; bool lspOpen = false, lspDirty = false; uint64_t lspHash = 0; long long lspEdit = 0;  // estado do LSP
     string name() const { return pstr(toPath(path).filename()); }
 };
 
 enum Mode { NORMAL, INSERT, VISUAL, VLINE };
-enum Focus { F_EDITOR, F_TREE };
+enum Focus { F_EDITOR, F_TREE, F_TERM };
 
-struct Config { string run = "rsfmake run", release = "rsfmake run -r"; bool terminal = false; };
+struct Config {
+    string run = "rsfmake run", release = "rsfmake run -r"; bool terminal = false;
+    string shell;  // vazio = $SHELL (Linux) / %COMSPEC% (Windows)
+    string lsp = "clangd --background-index --header-insertion=never"; bool lspOn = true;
+};
 struct Runner { pid_t pid = -1; int fd = -1; bool running = false, eof = false, killed = false; string part; };
 struct TreeNode { string path, name; bool dir; int depth; };
-struct Popup { bool on = false; vector<string> items; int sel = 0, start = 0; };
+struct Popup { bool on = false; vector<string> items, ins; int sel = 0, start = 0; };
 struct Hit { int x0, x1, idx, cx0; };
 
 static vector<Buffer> bufs; static int cur = -1;
+// divisão de tela: cada painel mostra um buffer; o painel ativo é sempre bufs[cur] (cursor/seleção ficam no buffer)
+struct Pane { int buf = -1, top = 0, left = 0; int x = 0, y = 0, w = 0, h = 0, hx = 0, hy = 0, hw = 0; };  // (x,y,w,h) = área do texto; (hx,hy,hw) = barra de título
+static vector<Pane> panes(1); static int activePane = 0; static bool splitCols = true;
+static struct { int x, y, w, h; } AP = {0, 0, 0, 0};  // área do texto do painel ativo
+static int bottomTab = 0;  // painel inferior: 0 = saída do Run, 1 = terminal
+static void layoutPanes();
+static void doDefinition(); static void doHover(); static void doBack();
 static string root; static Config cfg; static bool releaseMode = false;
 static Mode mode = NORMAL; static Focus focus = F_TREE;
 static bool showTree = true, showOut = false, quitting = false;
@@ -345,7 +373,7 @@ static Popup pop;
 static int SH = 24, SW = 80;
 static struct { int treeW, edX, edW, edY, edH, outY, outH, statY, msgY; } L;
 static int menuOpen = -1, menuSel = 0, btnW = 0, gGut = 4, gTX = 0, curSY = 0, curSX = 0;
-static vector<Hit> tabHits, menuHits, treeBtns;
+static vector<Hit> tabHits, menuHits, treeBtns, splitBtns, botHits;
 static struct { int x, y, w, h; } dropRect = {0, 0, 0, 0};
 static string startErr;
 // seleção no modo inserir (âncora = selAy/selAx; a outra ponta é o cursor), arraste do mouse e agrupamento do desfazer
@@ -398,10 +426,11 @@ static int readKey(int ms) {  // ms < 0 bloqueia
 static void layout() {
     getmaxyx(stdscr, SH, SW);
     L.msgY = SH - 1; L.statY = SH - 2;
-    L.outH = showOut ? std::max(4, std::min(12, (SH - 6) / 3)) : 0;
+    L.outH = !showOut ? 0 : bottomTab == 1 ? std::max(6, std::min(18, (SH - 6) / 2)) : std::max(4, std::min(12, (SH - 6) / 3));
     L.outY = L.statY - L.outH; L.edY = 2; L.edH = std::max(1, L.outY - L.edY);
     L.treeW = showTree ? std::min(32, std::max(22, SW / 4)) : 0;
     L.edX = showTree ? L.treeW + 1 : 0; L.edW = SW - L.edX;
+    layoutPanes();
 }
 
 // ============================================================ operações de buffer
@@ -429,6 +458,7 @@ static void doRedo() {
     b.undo.push_back({b.lines, b.cy, b.cx, b.dirty}); Snap s = b.redo.back(); b.redo.pop_back();
     b.lines = s.lines; b.cy = s.cy; b.cx = s.cx; b.dirty = s.dirty; clampCursor(b); setWant(b);
 }
+static void lspSaved(Buffer& b);
 static bool saveBuffer(Buffer& b) {
     std::ofstream f(toPath(b.path), std::ios::binary);
     if (!f) { setMsg("Error saving " + b.path, true); return false; }
@@ -436,7 +466,7 @@ static bool saveBuffer(Buffer& b) {
     const char* eol = b.crlf ? "\r\n" : "\n";
     for (auto& l : b.lines) f << l << eol;
     f.flush(); if (!f) { setMsg("Error writing " + b.path, true); return false; }
-    b.dirty = false; return true;
+    b.dirty = false; lspSaved(b); return true;
 }
 static string getRange(Buffer& b, int y1, int x1, int y2, int x2) {
     if (y1 == y2) return b.lines[y1].substr(x1, x2 - x1);
@@ -483,11 +513,12 @@ static void selRange(const Buffer& b, int& y1, int& x1, int& y2, int& x2) {
 }
 static string selText(Buffer& b) { int y1, x1, y2, x2; selRange(b, y1, x1, y2, x2); return getRange(b, y1, x1, y2, x2); }
 static void deleteSel(Buffer& b) { int y1, x1, y2, x2; selRange(b, y1, x1, y2, x2); delRange(b, y1, x1, y2, x2); insSel = false; }
+static int gutOf(const Buffer& b) { return std::max(3, (int)std::to_string(b.lines.size()).size()) + 2; }  // largura da margem de números
 static void mouseToCursor(Buffer& b, int x, int y) {  // y fora da área rola o texto (usado no arraste)
-    int row = y - L.edY, ny = b.top + row;
-    if (row < 0) ny = b.top - 1; else if (row >= L.edH) ny = b.top + L.edH;
+    int row = y - AP.y, ny = b.top + row;
+    if (row < 0) ny = b.top - 1; else if (row >= AP.h) ny = b.top + AP.h;
     b.cy = std::max(0, std::min((int)b.lines.size() - 1, ny));
-    b.cx = cxFromV(b.lines[b.cy], std::max(0, b.left + x - (L.edX + gGut)));
+    b.cx = cxFromV(b.lines[b.cy], std::max(0, b.left + x - (AP.x + gutOf(b))));
     clampCursor(b); setWant(b);
 }
 // Desfazer no inserir: digitar (1) e apagar (2) agrupam em sequência; qualquer outra edição (3) abre novo ponto.
@@ -771,23 +802,29 @@ static bool openFile(const string& p, int line = 0, int col = 0) {
     }
 place:
     Buffer& b = bufs[cur]; mode = NORMAL; focus = F_EDITOR; pop.on = false;
-    if (line > 0) { b.cy = std::min(line - 1, (int)b.lines.size() - 1); b.cx = col > 0 ? col - 1 : firstNonBlank(b.lines[b.cy]); clampCursor(b); b.top = std::max(0, b.cy - L.edH / 2); }
+    if (line > 0) { b.cy = std::min(line - 1, (int)b.lines.size() - 1); b.cx = col > 0 ? col - 1 : firstNonBlank(b.lines[b.cy]); clampCursor(b); b.top = std::max(0, b.cy - AP.h / 2); }
     setWant(b); return true;
 }
 static void loadConfig() {
     cfg = Config(); std::ifstream f(toPath(root) / ".vimple.conf"); string l;
     while (std::getline(f, l)) {
         size_t e = l.find('='); if (e == string::npos) continue; string k = l.substr(0, e), v = l.substr(e + 1);
+        if (!v.empty() && v.back() == '\r') v.pop_back();
         if (k == "run") cfg.run = v; else if (k == "release") cfg.release = v; else if (k == "terminal") cfg.terminal = (v == "1" || v == "on");
+        else if (k == "shell") cfg.shell = v; else if (k == "lsp") cfg.lsp = v; else if (k == "lspon") cfg.lspOn = (v == "1" || v == "on");
     }
 }
 static void saveConfig() {
-    std::ofstream f(toPath(root) / ".vimple.conf"); f << "run=" << cfg.run << "\nrelease=" << cfg.release << "\nterminal=" << (cfg.terminal ? 1 : 0) << "\n";
+    std::ofstream f(toPath(root) / ".vimple.conf"); f << "run=" << cfg.run << "\nrelease=" << cfg.release << "\nterminal=" << (cfg.terminal ? 1 : 0) << "\nshell=" << cfg.shell << "\nlsp=" << cfg.lsp << "\nlspon=" << (cfg.lspOn ? 1 : 0) << "\n";
 }
+static void lspStart(bool verbose = false); static void lspStop(); static void termKill(); static void sessionLoad(); static void sessionSave(); static void saveLastProject();
 static void openProject(const fs::path& p) {
+    if (!root.empty()) sessionSave();  // lembra os arquivos abertos do projeto que está saindo
+    lspStop(); termKill();
     { fs::path q = p; q.make_preferred(); root = trimSep(pstr(q)); }
-    bufs.clear(); cur = -1; expanded.clear(); tree.clear(); treeSel = treeTop = 0;
-    loadConfig(); refreshTree(); showTree = true; focus = F_TREE; mode = NORMAL; outLines.clear(); showOut = false;
+    bufs.clear(); cur = -1; panes.assign(1, Pane()); activePane = 0; expanded.clear(); tree.clear(); treeSel = treeTop = 0;
+    loadConfig(); refreshTree(); showTree = true; focus = F_TREE; mode = NORMAL; outLines.clear(); showOut = false; bottomTab = 0;
+    sessionLoad(); lspStart(false); saveLastProject();
 }
 
 // ============================================================ execução do projeto
@@ -905,7 +942,7 @@ static void startRun(bool rel) {
         printf("\n[code %d] Press Enter to return to the editor...", rc); fflush(stdout); (void)getchar();
         reset_prog_mode(); refresh(); clearok(stdscr, TRUE); return;
     }
-    outLines.clear(); outScroll = -1; showOut = true; outTitle = cmd; outPush("$ " + cmd);
+    outLines.clear(); outScroll = -1; showOut = true; bottomTab = 0; if (focus == F_TERM) focus = F_EDITOR; outTitle = cmd; outPush("$ " + cmd);
     if (!runnerStart(cmd)) setMsg("Failed to start the process", true);
 }
 static void gotoFilePos(const fs::path& fp, int line, int col) { selectPath(pstr(fp)); openFile(pstr(fp), line, col); }
@@ -932,6 +969,709 @@ static bool jumpFromLine(const string& s) {
     return false;
 }
 
+// ============================================================ processos filhos: pipes (LSP) e pty/ConPTY (terminal embutido)
+static void appendUtf8(string& o, unsigned cp) {
+    if (cp < 0x80) o += (char)cp;
+    else if (cp < 0x800) { o += (char)(0xC0 | (cp >> 6)); o += (char)(0x80 | (cp & 63)); }
+    else if (cp < 0x10000) { o += (char)(0xE0 | (cp >> 12)); o += (char)(0x80 | ((cp >> 6) & 63)); o += (char)(0x80 | (cp & 63)); }
+    else { o += (char)(0xF0 | (cp >> 18)); o += (char)(0x80 | ((cp >> 12) & 63)); o += (char)(0x80 | ((cp >> 6) & 63)); o += (char)(0x80 | (cp & 63)); }
+}
+struct Proc {
+    bool alive = false; int exitCode = 0;
+#ifdef _WIN32
+    void* h = nullptr; void* rd = nullptr; void* wr = nullptr; void* hpc = nullptr; unsigned long pid = 0;
+#else
+    pid_t pid = -1; int rd = -1, wr = -1;
+#endif
+};
+#ifdef _WIN32
+typedef long(__stdcall* PFN_CreatePC)(unsigned int, void*, void*, unsigned long, void**);
+typedef long(__stdcall* PFN_ResizePC)(void*, unsigned int);
+typedef void(__stdcall* PFN_ClosePC)(void*);
+static PFN_CreatePC pCreatePC = nullptr; static PFN_ResizePC pResizePC = nullptr; static PFN_ClosePC pClosePC = nullptr;
+static bool loadConPty() {  // ConPTY (Windows 10 1809+): resolvido em tempo de execução para não exigir SDK/import lib recentes
+    static int tried = 0; if (tried) return pCreatePC != nullptr; tried = 1;
+    void* k = GetModuleHandleA("kernel32.dll"); if (!k) return false;
+    pCreatePC = reinterpret_cast<PFN_CreatePC>(GetProcAddress(k, "CreatePseudoConsole"));
+    pResizePC = reinterpret_cast<PFN_ResizePC>(GetProcAddress(k, "ResizePseudoConsole"));
+    pClosePC = reinterpret_cast<PFN_ClosePC>(GetProcAddress(k, "ClosePseudoConsole"));
+    return pCreatePC && pResizePC && pClosePC;
+}
+static bool procSpawnPipes(Proc& p, const string& cmd, const string& cwd) {  // stdin/stdout por pipe, stderr descartado (LSP)
+    W32_SA sa = {(unsigned long)sizeof(W32_SA), nullptr, 1};
+    void *inR = nullptr, *inW = nullptr, *outR = nullptr, *outW = nullptr;
+    if (!CreatePipe(&inR, &inW, &sa, 1 << 20)) return false;
+    if (!CreatePipe(&outR, &outW, &sa, 1 << 20)) { CloseHandle(inR); CloseHandle(inW); return false; }
+    SetHandleInformation(inW, 1, 0); SetHandleInformation(outR, 1, 0);  // as pontas do editor não são herdadas
+    void* nul = CreateFileW(L"NUL", 0x40000000u, 3, &sa, 3, 0, nullptr);
+    W32_SI si; memset(&si, 0, sizeof si); si.cb = (unsigned long)sizeof si; si.flags = 0x101; si.show = 0; si.in = inR; si.out = outW;
+    si.err = (nul && nul != (void*)(intptr_t)-1) ? nul : outW;
+    W32_PI pi; memset(&pi, 0, sizeof pi); std::wstring line = u8w(cmd), wd = u8w(cwd);
+    int ok = CreateProcessW(nullptr, &line[0], nullptr, nullptr, 1, 0x08000000, nullptr, wd.empty() ? nullptr : wd.c_str(), &si, &pi);
+    CloseHandle(inR); CloseHandle(outW); if (nul && nul != (void*)(intptr_t)-1) CloseHandle(nul);
+    if (!ok) { CloseHandle(inW); CloseHandle(outR); return false; }
+    CloseHandle(pi.thr); p.h = pi.proc; p.rd = outR; p.wr = inW; p.pid = pi.pid; p.alive = true; return true;
+}
+static bool procSpawnPty(Proc& p, const string& cmd, const string& cwd, int rows, int cols) {  // ConPTY
+    if (!loadConPty()) return false;
+    W32_SA sa = {(unsigned long)sizeof(W32_SA), nullptr, 0};
+    void *inR = nullptr, *inW = nullptr, *outR = nullptr, *outW = nullptr;
+    if (!CreatePipe(&inR, &inW, &sa, 0)) return false;
+    if (!CreatePipe(&outR, &outW, &sa, 0)) { CloseHandle(inR); CloseHandle(inW); return false; }
+    void* hpc = nullptr; unsigned sz = ((unsigned)(cols & 0xFFFF)) | ((unsigned)rows << 16);
+    if (pCreatePC(sz, inR, outW, 0, &hpc) < 0) { CloseHandle(inR); CloseHandle(inW); CloseHandle(outR); CloseHandle(outW); return false; }
+    CloseHandle(inR); CloseHandle(outW);
+    size_t asz = 0; InitializeProcThreadAttributeList(nullptr, 1, 0, &asz);
+    void* al = asz ? malloc(asz) : nullptr;
+    if (!al || !InitializeProcThreadAttributeList(al, 1, 0, &asz)) { if (al) free(al); pClosePC(hpc); CloseHandle(inW); CloseHandle(outR); return false; }
+    UpdateProcThreadAttribute(al, 0, 0x00020016 /*PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE*/, hpc, sizeof(void*), nullptr, nullptr);
+    W32_SIX si; memset(&si, 0, sizeof si); si.si.cb = (unsigned long)sizeof si; si.attr = al;
+    W32_PI pi; memset(&pi, 0, sizeof pi); std::wstring line = u8w(cmd), wd = u8w(cwd);
+    int ok = CreateProcessW(nullptr, &line[0], nullptr, nullptr, 0, 0x00080000 | 0x00000400, nullptr, wd.empty() ? nullptr : wd.c_str(), &si.si, &pi);
+    DeleteProcThreadAttributeList(al); free(al);
+    if (!ok) { CloseHandle(inW); CloseHandle(outR); pClosePC(hpc); return false; }
+    CloseHandle(pi.thr); p.h = pi.proc; p.rd = outR; p.wr = inW; p.hpc = hpc; p.pid = pi.pid; p.alive = true; return true;
+}
+static void procResizePty(Proc& p, int rows, int cols) { if (p.hpc && pResizePC) pResizePC(p.hpc, ((unsigned)(cols & 0xFFFF)) | ((unsigned)rows << 16)); }
+static int procReadSome(Proc& p, char* buf, int n) {  // >0 bytes · 0 nada agora · -1 fechado
+    if (!p.rd) return -1; unsigned long avail = 0;
+    if (!PeekNamedPipe(p.rd, nullptr, 0, nullptr, &avail, nullptr)) return -1;
+    if (avail == 0) return 0; unsigned long got = 0;
+    if (!ReadFile(p.rd, buf, (unsigned long)std::min<unsigned long>(avail, (unsigned long)n), &got, nullptr)) return -1;
+    return (int)got;
+}
+static int procWriteSome(Proc& p, const char* d, int n) {
+    if (!p.wr) return -1; unsigned long w = 0;
+    if (!WriteFile(p.wr, d, (unsigned long)n, &w, nullptr)) return -1;
+    return (int)w;
+}
+static bool procCheckExit(Proc& p) {  // true = acabou de terminar
+    if (!p.alive || !p.h) return false; unsigned long code = 259;
+    if (!GetExitCodeProcess(p.h, &code)) code = 1;
+    if (code == 259) return false;
+    p.alive = false; p.exitCode = (int)code; return true;
+}
+static void procStop(Proc& p) {
+    if (p.alive && p.h) TerminateProcess(p.h, 1);
+    if (p.rd) CloseHandle(p.rd); if (p.wr) CloseHandle(p.wr);
+    if (p.hpc && pClosePC) pClosePC(p.hpc);
+    if (p.h) CloseHandle(p.h);
+    p = Proc();
+}
+#else
+static bool procSpawnPipes(Proc& p, const string& cmd, const string& cwd) {  // stdin/stdout por pipe, stderr descartado (LSP)
+    int in[2], out[2]; if (pipe(in) < 0) return false;
+    if (pipe(out) < 0) { close(in[0]); close(in[1]); return false; }
+    pid_t id = fork();
+    if (id < 0) { close(in[0]); close(in[1]); close(out[0]); close(out[1]); return false; }
+    if (id == 0) {
+        setsid(); dup2(in[0], 0); dup2(out[1], 1); int dn = open("/dev/null", O_WRONLY); if (dn >= 0) dup2(dn, 2);
+        close(in[0]); close(in[1]); close(out[0]); close(out[1]);
+        if (!cwd.empty() && chdir(cwd.c_str()) != 0) _exit(126);
+        string c = "exec " + cmd; execl("/bin/sh", "sh", "-c", c.c_str(), (char*)nullptr); _exit(127);
+    }
+    close(in[0]); close(out[1]); p.wr = in[1]; p.rd = out[0];
+    fcntl(p.rd, F_SETFL, O_NONBLOCK); fcntl(p.wr, F_SETFL, O_NONBLOCK); fcntl(p.rd, F_SETFD, FD_CLOEXEC); fcntl(p.wr, F_SETFD, FD_CLOEXEC);
+    p.pid = id; p.alive = true; return true;
+}
+static bool procSpawnPty(Proc& p, const string& cmd, const string& cwd, int rows, int cols) {  // pty POSIX (sem precisar de -lutil)
+    int m = posix_openpt(O_RDWR | O_NOCTTY); if (m < 0) return false;
+    if (grantpt(m) < 0 || unlockpt(m) < 0) { close(m); return false; }
+    const char* sn = ptsname(m); if (!sn) { close(m); return false; }
+    string slave = sn; struct winsize ws; memset(&ws, 0, sizeof ws); ws.ws_row = (unsigned short)rows; ws.ws_col = (unsigned short)cols; ioctl(m, TIOCSWINSZ, &ws);
+    pid_t id = fork(); if (id < 0) { close(m); return false; }
+    if (id == 0) {
+        setsid(); int s = open(slave.c_str(), O_RDWR); if (s < 0) _exit(126);
+        ioctl(s, TIOCSCTTY, 0); dup2(s, 0); dup2(s, 1); dup2(s, 2); if (s > 2) close(s); close(m);
+        if (!cwd.empty() && chdir(cwd.c_str()) != 0) { /* fica na pasta atual */ }
+        setenv("TERM", "xterm-256color", 1); unsetenv("LINES"); unsetenv("COLUMNS");
+        execl("/bin/sh", "sh", "-c", cmd.c_str(), (char*)nullptr); _exit(127);
+    }
+    p.rd = p.wr = m; fcntl(m, F_SETFL, O_NONBLOCK); fcntl(m, F_SETFD, FD_CLOEXEC); p.pid = id; p.alive = true; return true;
+}
+static void procResizePty(Proc& p, int rows, int cols) {
+    if (p.wr < 0) return; struct winsize ws; memset(&ws, 0, sizeof ws); ws.ws_row = (unsigned short)rows; ws.ws_col = (unsigned short)cols; ioctl(p.wr, TIOCSWINSZ, &ws);
+}
+static int procReadSome(Proc& p, char* buf, int n) {  // >0 bytes · 0 nada agora · -1 fechado
+    if (p.rd < 0) return -1; ssize_t r = read(p.rd, buf, (size_t)n);
+    if (r > 0) return (int)r; if (r == 0) return -1;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
+    return -1;
+}
+static int procWriteSome(Proc& p, const char* d, int n) {
+    if (p.wr < 0) return -1; ssize_t r = write(p.wr, d, (size_t)n);
+    if (r >= 0) return (int)r;
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return 0;
+    return -1;
+}
+static bool procCheckExit(Proc& p) {  // true = acabou de terminar
+    if (!p.alive || p.pid <= 0) return false; int st = 0; pid_t r = waitpid(p.pid, &st, WNOHANG);
+    if (r != p.pid) return false;
+    p.alive = false; p.exitCode = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st); p.pid = -1; return true;
+}
+static void procStop(Proc& p) {
+    if (p.alive && p.pid > 0) { kill(-p.pid, SIGKILL); kill(p.pid, SIGKILL); int st = 0; waitpid(p.pid, &st, 0); }
+    if (p.rd >= 0) close(p.rd); if (p.wr >= 0 && p.wr != p.rd) close(p.wr);
+    p = Proc();
+}
+#endif
+
+// ============================================================ terminal embutido (emulador VT100/xterm simplificado)
+struct TCell { uint32_t ch = ' '; uint8_t fg = 8, fl = 0; };  // fg: 0-7 cor ANSI, 8 padrão · fl: 1 negrito, 2 inverso, 4 sublinhado
+struct Term {
+    Proc p; bool started = false, exited = false;
+    int rows = 0, cols = 0, cy = 0, cx = 0, sy = 0, sx = 0, scrTop = 0, scrBot = 0, scrollOff = 0, altCy = 0, altCx = 0;
+    bool wrapPending = false, appCursor = false, showCur = true, alt = false, bracketed = false;
+    uint8_t curFg = 8, curFl = 0, sFg = 8, sFl = 0;
+    vector<vector<TCell>> grid, altGrid; std::deque<vector<TCell>> sb;
+    int ps = 0; string pbuf; unsigned ucp = 0; int uneed = 0; string outq;
+};
+static Term term;
+static void tReset(int r, int c) {
+    term.rows = std::max(2, r); term.cols = std::max(10, c); term.grid.assign((size_t)term.rows, vector<TCell>((size_t)term.cols)); term.altGrid.clear(); term.sb.clear();
+    term.cy = term.cx = term.sy = term.sx = 0; term.scrTop = 0; term.scrBot = term.rows - 1; term.wrapPending = false; term.appCursor = false; term.showCur = true;
+    term.alt = false; term.bracketed = false; term.curFg = 8; term.curFl = 0; term.sFg = 8; term.sFl = 0; term.ps = 0; term.uneed = 0; term.scrollOff = 0; term.outq.clear(); term.pbuf.clear();
+}
+static vector<TCell> tBlank() { return vector<TCell>((size_t)std::max(1, term.cols)); }
+static void tResize(int r, int c) {
+    r = std::max(2, r); c = std::max(10, c); if (r == term.rows && c == term.cols) return;
+    vector<vector<TCell>> g((size_t)r, vector<TCell>((size_t)c)); int drop = term.cy >= r ? term.cy - r + 1 : 0;
+    for (int y = 0; y < r; y++) { int oy = y + drop; if (oy >= term.rows) break; for (int x = 0; x < std::min(c, term.cols); x++) g[y][x] = term.grid[oy][x]; }
+    if (!term.alt) for (int y = 0; y < drop && y < term.rows; y++) { term.sb.push_back(term.grid[y]); if (term.sb.size() > 3000) term.sb.pop_front(); }
+    term.grid.swap(g); term.rows = r; term.cols = c; term.cy = std::max(0, term.cy - drop); term.cx = std::min(term.cx, c - 1);
+    term.scrTop = 0; term.scrBot = r - 1; term.wrapPending = false; term.altGrid.clear(); term.scrollOff = std::min(term.scrollOff, (int)term.sb.size());
+}
+static void tScrollUp(int n) {
+    for (int i = 0; i < n; i++) {
+        if (term.scrTop == 0 && !term.alt) { term.sb.push_back(term.grid[0]); if (term.sb.size() > 3000) term.sb.pop_front(); }
+        term.grid.erase(term.grid.begin() + term.scrTop); term.grid.insert(term.grid.begin() + term.scrBot, tBlank());
+    }
+}
+static void tScrollDown(int n) {
+    for (int i = 0; i < n; i++) { term.grid.erase(term.grid.begin() + term.scrBot); term.grid.insert(term.grid.begin() + term.scrTop, tBlank()); }
+}
+static void tLF() { if (term.cy == term.scrBot) tScrollUp(1); else if (term.cy < term.rows - 1) term.cy++; }
+static void tPut(unsigned cp) {
+    if (term.wrapPending) { term.cx = 0; tLF(); term.wrapPending = false; }
+    TCell& c = term.grid[term.cy][term.cx]; c.ch = cp; c.fg = term.curFg; c.fl = term.curFl;
+    if (term.cx >= term.cols - 1) term.wrapPending = true; else term.cx++;
+}
+static void tReply(const string& s) { term.outq += s; }
+static void tAlt(bool on) {
+    if (on && !term.alt) {
+        term.altGrid = term.grid; term.altCy = term.cy; term.altCx = term.cx; term.alt = true;
+        for (auto& r : term.grid) r.assign((size_t)term.cols, TCell()); term.cy = term.cx = 0; term.scrollOff = 0;
+    } else if (!on && term.alt) {
+        term.alt = false;
+        if ((int)term.altGrid.size() == term.rows && !term.altGrid.empty() && (int)term.altGrid[0].size() == term.cols) term.grid = term.altGrid;
+        else for (auto& r : term.grid) r.assign((size_t)term.cols, TCell());
+        term.cy = std::min(term.altCy, term.rows - 1); term.cx = std::min(term.altCx, term.cols - 1); term.altGrid.clear();
+    }
+    term.wrapPending = false; term.scrTop = 0; term.scrBot = term.rows - 1;
+}
+static int tBasicFromRgb(int r, int g, int b) { return (r > 127 ? 1 : 0) | (g > 127 ? 2 : 0) | (b > 127 ? 4 : 0); }
+static void tSgr(const int* pr, int np) {
+    if (np == 0) { term.curFg = 8; term.curFl = 0; return; }
+    for (int i = 0; i < np; i++) {
+        int v = pr[i] < 0 ? 0 : pr[i];
+        if (v == 0) { term.curFg = 8; term.curFl = 0; }
+        else if (v == 1) term.curFl |= 1; else if (v == 4) term.curFl |= 4; else if (v == 7) term.curFl |= 2;
+        else if (v == 22) term.curFl &= (uint8_t)~1; else if (v == 24) term.curFl &= (uint8_t)~4; else if (v == 27) term.curFl &= (uint8_t)~2;
+        else if (v >= 30 && v <= 37) term.curFg = (uint8_t)(v - 30);
+        else if (v == 39) term.curFg = 8;
+        else if (v >= 90 && v <= 97) { term.curFg = (uint8_t)(v - 90); term.curFl |= 1; }
+        else if (v == 38 || v == 48) {
+            bool fgSel = v == 38;
+            if (i + 2 < np && pr[i + 1] == 5) {
+                int n = pr[i + 2]; i += 2; int c = 8;
+                if (n >= 0 && n < 8) c = n; else if (n >= 8 && n < 16) { c = n - 8; if (fgSel) term.curFl |= 1; }
+                else if (n >= 16 && n < 232) { int q = n - 16; c = tBasicFromRgb((q / 36) >= 3 ? 255 : 0, ((q / 6) % 6) >= 3 ? 255 : 0, (q % 6) >= 3 ? 255 : 0); }
+                else if (n >= 232) c = n >= 244 ? 7 : 0;
+                if (fgSel) term.curFg = (uint8_t)c;
+            } else if (i + 4 < np && pr[i + 1] == 2) { int c = tBasicFromRgb(pr[i + 2], pr[i + 3], pr[i + 4]); i += 4; if (fgSel) term.curFg = (uint8_t)c; }
+        }
+    }
+}
+static void tEraseRange(int y, int x1, int x2) { for (int x = x1; x < x2 && x < term.cols; x++) term.grid[y][x] = TCell(); }
+static void tCsi(char f) {
+    string s = term.pbuf; char priv = 0;
+    if (!s.empty() && (s[0] == '?' || s[0] == '>' || s[0] == '=' || s[0] == '<')) { priv = s[0]; s.erase(0, 1); }
+    for (char c : s) if (c < '0' || c > ';') return;  // byte intermediário (espaço, !, $ ...): ignora a sequência
+    int pr[16]; int np = 0; int v = -1;
+    for (size_t i = 0; i <= s.size(); i++) {
+        char c = i < s.size() ? s[i] : ';';
+        if (c >= '0' && c <= '9') v = (v < 0 ? 0 : v) * 10 + (c - '0');
+        else { if (np < 16) pr[np++] = v; v = -1; }
+    }
+    if (s.empty()) np = 0;
+    auto P = [&](int i, int d) { return (i < np && pr[i] > 0) ? pr[i] : d; };
+    auto Z = [&](int i) { return (i < np && pr[i] > 0) ? pr[i] : 0; };
+    term.wrapPending = (f == 'm' || f == 'h' || f == 'l') ? term.wrapPending : false;
+    switch (f) {
+    case 'A': term.cy = std::max(0, term.cy - P(0, 1)); break;
+    case 'B': term.cy = std::min(term.rows - 1, term.cy + P(0, 1)); break;
+    case 'C': term.cx = std::min(term.cols - 1, term.cx + P(0, 1)); break;
+    case 'D': term.cx = std::max(0, term.cx - P(0, 1)); break;
+    case 'E': term.cy = std::min(term.rows - 1, term.cy + P(0, 1)); term.cx = 0; break;
+    case 'F': term.cy = std::max(0, term.cy - P(0, 1)); term.cx = 0; break;
+    case 'G': case '`': term.cx = std::max(0, std::min(term.cols - 1, P(0, 1) - 1)); break;
+    case 'H': case 'f': term.cy = std::max(0, std::min(term.rows - 1, P(0, 1) - 1)); term.cx = std::max(0, std::min(term.cols - 1, P(1, 1) - 1)); break;
+    case 'd': term.cy = std::max(0, std::min(term.rows - 1, P(0, 1) - 1)); break;
+    case 'J': {
+        int m = Z(0);
+        if (m == 0) { tEraseRange(term.cy, term.cx, term.cols); for (int y = term.cy + 1; y < term.rows; y++) tEraseRange(y, 0, term.cols); }
+        else if (m == 1) { for (int y = 0; y < term.cy; y++) tEraseRange(y, 0, term.cols); tEraseRange(term.cy, 0, term.cx + 1); }
+        else { for (int y = 0; y < term.rows; y++) tEraseRange(y, 0, term.cols); if (m == 3) term.sb.clear(); }
+        break; }
+    case 'K': { int m = Z(0); if (m == 0) tEraseRange(term.cy, term.cx, term.cols); else if (m == 1) tEraseRange(term.cy, 0, term.cx + 1); else tEraseRange(term.cy, 0, term.cols); break; }
+    case 'L': if (term.cy >= term.scrTop && term.cy <= term.scrBot) for (int i = 0; i < P(0, 1); i++) { term.grid.erase(term.grid.begin() + term.scrBot); term.grid.insert(term.grid.begin() + term.cy, tBlank()); } break;
+    case 'M': if (term.cy >= term.scrTop && term.cy <= term.scrBot) for (int i = 0; i < P(0, 1); i++) { term.grid.erase(term.grid.begin() + term.cy); term.grid.insert(term.grid.begin() + term.scrBot, tBlank()); } break;
+    case 'P': { auto& r = term.grid[term.cy]; int n = std::min(P(0, 1), term.cols - term.cx); r.erase(r.begin() + term.cx, r.begin() + term.cx + n); r.resize((size_t)term.cols); break; }
+    case '@': { auto& r = term.grid[term.cy]; int n = std::min(P(0, 1), term.cols - term.cx); r.insert(r.begin() + term.cx, (size_t)n, TCell()); r.resize((size_t)term.cols); break; }
+    case 'X': tEraseRange(term.cy, term.cx, term.cx + P(0, 1)); break;
+    case 'S': tScrollUp(P(0, 1)); break;
+    case 'T': tScrollDown(P(0, 1)); break;
+    case 'm': tSgr(pr, np); break;
+    case 'r': { int t = P(0, 1) - 1, b = P(1, term.rows) - 1; if (t >= 0 && b < term.rows && t < b) { term.scrTop = t; term.scrBot = b; } term.cy = 0; term.cx = 0; break; }
+    case 's': term.sy = term.cy; term.sx = term.cx; term.sFg = term.curFg; term.sFl = term.curFl; break;
+    case 'u': term.cy = std::min(term.sy, term.rows - 1); term.cx = std::min(term.sx, term.cols - 1); break;
+    case 'n': if (Z(0) == 6) tReply("\x1b[" + std::to_string(term.cy + 1) + ";" + std::to_string(term.cx + 1) + "R"); else if (Z(0) == 5) tReply("\x1b[0n"); break;
+    case 'c': if (priv == 0) tReply("\x1b[?1;2c"); else if (priv == '>') tReply("\x1b[>0;0;0c"); break;
+    case 'h': case 'l': {
+        bool on = f == 'h';
+        if (priv == '?') for (int i = 0; i < np; i++) switch (pr[i]) {
+                case 1: term.appCursor = on; break; case 25: term.showCur = on; break;
+                case 47: case 1047: case 1049: tAlt(on); break; case 2004: term.bracketed = on; break;
+                }
+        break; }
+    }
+}
+static void tCtl(unsigned char c) {
+    switch (c) {
+    case '\n': case 11: case 12: term.wrapPending = false; tLF(); break;
+    case '\r': term.cx = 0; term.wrapPending = false; break;
+    case 8: if (term.cx > 0) term.cx--; term.wrapPending = false; break;
+    case 9: term.cx = std::min(term.cols - 1, (term.cx / 8 + 1) * 8); term.wrapPending = false; break;
+    }
+}
+static void tFeed(const char* d, int n) {
+    for (int i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)d[i];
+        if (term.uneed > 0) {
+            if ((c & 0xC0) == 0x80) { term.ucp = (term.ucp << 6) | (c & 0x3F); if (--term.uneed == 0) tPut(term.ucp); continue; }
+            term.uneed = 0;
+        }
+        switch (term.ps) {
+        case 0:
+            if (c == 27) term.ps = 1;
+            else if (c < 32) tCtl(c);
+            else if (c == 127) {}
+            else if (c < 0x80) tPut(c);
+            else if (c >= 0xC0) { term.uneed = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : 1; term.ucp = c & (c >= 0xF0 ? 0x07 : c >= 0xE0 ? 0x0F : 0x1F); }
+            break;
+        case 1:
+            term.ps = 0;
+            if (c == '[') { term.ps = 2; term.pbuf.clear(); }
+            else if (c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_') term.ps = 3;
+            else if (c == '(' || c == ')' || c == '*' || c == '+' || c == '#') term.ps = 4;
+            else if (c == '7') { term.sy = term.cy; term.sx = term.cx; term.sFg = term.curFg; term.sFl = term.curFl; }
+            else if (c == '8') { term.cy = std::min(term.sy, term.rows - 1); term.cx = std::min(term.sx, term.cols - 1); term.curFg = term.sFg; term.curFl = term.sFl; }
+            else if (c == 'M') { if (term.cy == term.scrTop) tScrollDown(1); else if (term.cy > 0) term.cy--; }
+            else if (c == 'D') tLF();
+            else if (c == 'E') { term.cx = 0; tLF(); }
+            else if (c == 'c') { int r = term.rows, cc = term.cols; tReset(r, cc); }
+            else if (c == 27) term.ps = 1;
+            break;
+        case 2:
+            if (c >= 0x40 && c <= 0x7E) { tCsi((char)c); term.ps = 0; }
+            else if (c == 27) term.ps = 1;
+            else if (c >= 0x20 && c <= 0x3F) { if (term.pbuf.size() < 64) term.pbuf += (char)c; }
+            else term.ps = 0;
+            break;
+        case 3: if (c == 7) term.ps = 0; else if (c == 27) term.ps = 5; break;
+        case 4: term.ps = 0; break;
+        case 5: term.ps = 0; break;
+        }
+    }
+}
+static void termFlush() {
+    while (!term.outq.empty() && term.p.alive) {
+        int w = procWriteSome(term.p, term.outq.data(), (int)std::min<size_t>(term.outq.size(), 4096)); if (w <= 0) break;
+        term.outq.erase(0, (size_t)w);
+    }
+}
+static void termSend(const string& s) { if (term.p.alive) { term.outq += s; termFlush(); } }
+static void termKill() { procStop(term.p); term = Term(); }
+static bool termStart() {
+    int rows = std::max(2, L.outH - 1), cols = std::max(10, SW); string cmd = cfg.shell;
+#ifdef _WIN32
+    if (cmd.empty()) { const wchar_t* cs = _wgetenv(L"COMSPEC"); cmd = (cs && *cs) ? wu8(cs) : "cmd.exe"; if (cmd.find(' ') != string::npos) cmd = "\"" + cmd + "\""; }
+#else
+    cmd = cmd.empty() ? string("exec \"${SHELL:-/bin/sh}\"") : "exec " + cmd;
+#endif
+    procStop(term.p); tReset(rows, cols);
+    if (!procSpawnPty(term.p, cmd, root, rows, cols)) {
+        term.started = false; term.exited = true;
+        string m = "Could not start the shell (" + (cfg.shell.empty() ? string("default") : cfg.shell) + ").\r\nSet it in Project > Configure run. Press any key to retry.\r\n"; tFeed(m.data(), (int)m.size()); return false;
+    }
+    term.started = true; term.exited = false; return true;
+}
+static void termFinish() {
+    int code = term.p.exitCode; procStop(term.p); term.started = false; term.exited = true;
+    string m = "\r\n[process exited (code " + std::to_string(code) + ") — press any key or click here to restart]\r\n"; tFeed(m.data(), (int)m.size());
+}
+static bool termPoll() {
+    if (!term.started) return false;
+    bool ch = false; char buf[8192]; bool eof = false; termFlush();
+    for (int g = 0; g < 16; g++) { int n = procReadSome(term.p, buf, sizeof buf); if (n > 0) { tFeed(buf, n); ch = true; } else { if (n < 0) eof = true; break; } }
+    if (!term.outq.empty()) termFlush();
+    if (term.p.alive && procCheckExit(term.p)) eof = true;
+    if (eof) {
+        if (term.p.alive) for (int t = 0; t < 5 && !procCheckExit(term.p); t++) napms(20);
+        for (int g = 0; g < 16; g++) { int n = procReadSome(term.p, buf, sizeof buf); if (n > 0) tFeed(buf, n); else break; }
+        termFinish(); ch = true;
+    }
+    return ch;
+}
+static void termFit() {
+    if (!term.started) return; int r = std::max(2, L.outH - 1), c = std::max(10, SW);
+    if (r != term.rows || c != term.cols) { tResize(r, c); procResizePty(term.p, term.rows, term.cols); }
+}
+static void termKey(int ch) {
+    if (term.exited) { term.exited = false; return; }  // qualquer tecla reinicia o shell
+    if (!term.started) return;
+    term.scrollOff = 0; string s;
+    switch (ch) {
+    case KEY_UP: s = term.appCursor ? "\x1bOA" : "\x1b[A"; break; case KEY_DOWN: s = term.appCursor ? "\x1bOB" : "\x1b[B"; break;
+    case KEY_RIGHT: s = term.appCursor ? "\x1bOC" : "\x1b[C"; break; case KEY_LEFT: s = term.appCursor ? "\x1bOD" : "\x1b[D"; break;
+    case KEY_HOME: s = "\x1b[H"; break; case KEY_END: s = "\x1b[F"; break; case KEY_PPAGE: s = "\x1b[5~"; break; case KEY_NPAGE: s = "\x1b[6~"; break;
+    case KEY_DC: s = "\x1b[3~"; break; case KEY_IC: s = "\x1b[2~"; break; case KEY_BTAB: s = "\x1b[Z"; break;
+    case KEY_ENTER: case 10: case 13: s = "\r"; break;
+    case KEY_BACKSPACE: case 127: case 8: s = "\x7f"; break;
+    case 22: {  // Ctrl-V cola
+        string t = readClip(), o; for (size_t i = 0; i < t.size(); i++) { if (t[i] == '\r') continue; o += t[i] == '\n' ? '\r' : t[i]; }
+        if (o.empty()) return; s = term.bracketed ? "\x1b[200~" + o + "\x1b[201~" : o; break; }
+    default: if (ch >= 0 && ch < 256) s = string(1, (char)ch); break;
+    }
+    if (!s.empty()) termSend(s);
+}
+
+// ============================================================ JSON mínimo (para o protocolo LSP)
+struct J {
+    enum T { NUL, BOOL, NUM, STR, ARR, OBJ } t = NUL; bool b = false; double n = 0; string s; vector<string> k; vector<J> v;
+    const J& get(const string& key) const { static const J nul; for (size_t i = 0; i < k.size(); i++) if (k[i] == key) return v[i]; return nul; }
+    const J& at(size_t i) const { static const J nul; return i < v.size() ? v[i] : nul; }
+    bool isStr() const { return t == STR; } bool isArr() const { return t == ARR; } bool isObj() const { return t == OBJ; }
+    int num(int d = 0) const { return t == NUM ? (int)n : d; }
+    string str() const { return t == STR ? s : string(); }
+};
+struct JParser {
+    const string& s; size_t i = 0; bool ok = true;
+    explicit JParser(const string& str) : s(str) {}
+    void ws() { while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++; }
+    unsigned hex4() {
+        unsigned v = 0;
+        for (int q = 0; q < 4 && i < s.size(); q++) { char c = s[i++]; v <<= 4; if (c >= '0' && c <= '9') v |= (unsigned)(c - '0'); else if (c >= 'a' && c <= 'f') v |= (unsigned)(c - 'a' + 10); else if (c >= 'A' && c <= 'F') v |= (unsigned)(c - 'A' + 10); }
+        return v;
+    }
+    string str() {  // parado na aspa de abertura
+        string o; i++;
+        while (i < s.size()) {
+            char c = s[i++]; if (c == '"') return o;
+            if (c != '\\') { o += c; continue; }
+            if (i >= s.size()) break; char e = s[i++];
+            switch (e) {
+            case 'n': o += '\n'; break; case 't': o += '\t'; break; case 'r': o += '\r'; break; case 'b': o += '\b'; break; case 'f': o += '\f'; break;
+            case 'u': {
+                unsigned cp = hex4();
+                if (cp >= 0xD800 && cp < 0xDC00 && i + 1 < s.size() && s[i] == '\\' && s[i + 1] == 'u') { i += 2; unsigned lo = hex4(); cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); }
+                appendUtf8(o, cp); break; }
+            default: o += e; break;
+            }
+        }
+        ok = false; return o;
+    }
+    J val(int depth = 0) {
+        J r; ws(); if (i >= s.size() || depth > 64) { ok = false; return r; }
+        char c = s[i];
+        if (c == '{') {
+            r.t = J::OBJ; i++; ws(); if (i < s.size() && s[i] == '}') { i++; return r; }
+            for (;;) {
+                ws(); if (i >= s.size() || s[i] != '"') { ok = false; return r; }
+                string key = str(); ws(); if (i >= s.size() || s[i] != ':') { ok = false; return r; } i++;
+                J x = val(depth + 1); if (!ok) return r; r.k.push_back(key); r.v.push_back(std::move(x)); ws();
+                if (i < s.size() && s[i] == ',') { i++; continue; } if (i < s.size() && s[i] == '}') { i++; break; } ok = false; return r;
+            }
+        } else if (c == '[') {
+            r.t = J::ARR; i++; ws(); if (i < s.size() && s[i] == ']') { i++; return r; }
+            for (;;) {
+                J x = val(depth + 1); if (!ok) return r; r.v.push_back(std::move(x)); ws();
+                if (i < s.size() && s[i] == ',') { i++; continue; } if (i < s.size() && s[i] == ']') { i++; break; } ok = false; return r;
+            }
+        } else if (c == '"') { r.t = J::STR; r.s = str(); }
+        else if (s.compare(i, 4, "true") == 0) { r.t = J::BOOL; r.b = true; i += 4; }
+        else if (s.compare(i, 5, "false") == 0) { r.t = J::BOOL; i += 5; }
+        else if (s.compare(i, 4, "null") == 0) { i += 4; }
+        else {
+            size_t j = i; while (j < s.size() && (isdigit((unsigned char)s[j]) || s[j] == '-' || s[j] == '+' || s[j] == '.' || s[j] == 'e' || s[j] == 'E')) j++;
+            if (j == i) { ok = false; return r; } r.t = J::NUM; r.n = atof(s.substr(i, j - i).c_str()); i = j;
+        }
+        return r;
+    }
+};
+static string fixUtf8(const string& s) {  // JSON exige UTF-8 válido: bytes inválidos viram U+FFFD
+    string o; o.reserve(s.size());
+    for (size_t i = 0; i < s.size();) {
+        unsigned char c = (unsigned char)s[i]; int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0; bool good = n > 0 && i + (size_t)n <= s.size();
+        for (int k = 1; good && k < n; k++) if ((((unsigned char)s[i + k]) & 0xC0) != 0x80) good = false;
+        if (good) { o.append(s, i, (size_t)n); i += (size_t)n; } else { o += "\xEF\xBF\xBD"; i++; }
+    }
+    return o;
+}
+static string jq(const string& in) {
+    string s = fixUtf8(in), o = "\""; static const char* hx = "0123456789abcdef";
+    for (unsigned char c : s) {
+        switch (c) {
+        case '"': o += "\\\""; break; case '\\': o += "\\\\"; break; case '\n': o += "\\n"; break; case '\r': o += "\\r"; break; case '\t': o += "\\t"; break;
+        default: if (c < 0x20) { o += "\\u00"; o += hx[c >> 4]; o += hx[c & 15]; } else o += (char)c;
+        }
+    }
+    return o + "\"";
+}
+
+// ============================================================ LSP (clangd): cliente JSON-RPC sobre stdio
+static int u16FromByte(const string& l, int bi) { int u = 0; for (int i = 0; i < bi && i < (int)l.size();) { int c = cplen((unsigned char)l[i]); u += c == 4 ? 2 : 1; i += c; } return u; }
+static int byteFromU16(const string& l, int u16) { int u = 0, i = 0; while (i < (int)l.size() && u < u16) { int c = cplen((unsigned char)l[i]); u += c == 4 ? 2 : 1; i += c; } return std::min(i, (int)l.size()); }
+static string pathToUri(const string& p) {
+    string s = p; for (auto& c : s) if (c == '\\') c = '/';
+    string o = "file://"; if (s.empty() || s[0] != '/') o += "/"; static const char* hx = "0123456789ABCDEF";
+    for (unsigned char c : s) { if (isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~' || c == '/' || c == ':') o += (char)c; else { o += '%'; o += hx[c >> 4]; o += hx[c & 15]; } }
+    return o;
+}
+static string uriToPath(const string& u) {
+    if (!startsWith(u, "file://")) return "";
+    string in = u.substr(7), s;
+    for (size_t i = 0; i < in.size(); i++) {
+        if (in[i] == '%' && i + 2 < in.size() + 0 && isxdigit((unsigned char)in[i + 1]) && isxdigit((unsigned char)in[i + 2])) { s += (char)strtol(in.substr(i + 1, 2).c_str(), nullptr, 16); i += 2; }
+        else s += in[i];
+    }
+#ifdef _WIN32
+    if (s.size() >= 3 && s[0] == '/' && isalpha((unsigned char)s[1]) && s[2] == ':') s.erase(0, 1);
+    for (auto& c : s) if (c == '/') c = '\\';
+#endif
+    return s;
+}
+static bool isCppFile(const string& path) {
+    string e = lowerA(pstr(toPath(path).extension()));
+    static const char* X[] = {".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl", ".tpp"};
+    for (auto* x : X) if (e == x) return true;
+    return false;
+}
+static uint64_t textHash(const Buffer& b) {
+    uint64_t h = 1469598103934665603ull;
+    for (auto& l : b.lines) { for (unsigned char c : l) { h ^= c; h *= 1099511628211ull; } h ^= 10; h *= 1099511628211ull; }
+    return h;
+}
+static string docText(const Buffer& b) { string t; for (size_t i = 0; i < b.lines.size(); i++) { t += b.lines[i]; t += '\n'; } return t; }
+static long long lspNow() { return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+struct LspCItem { string label, detail, sort, filter, ins; int kind = 0; };
+enum { LK_INIT = 1, LK_COMPL, LK_HOVER, LK_DEF };
+struct LspState {
+    int state = 0;  // 0 desligado · 1 iniciando · 2 pronto · 3 falhou
+    Proc p; string in, out, failMsg; int nextId = 1; std::map<int, int> pend; bool verbose = false;
+    vector<LspCItem> items; string cPath; int cY = -1, cSt = 0; bool cIncomplete = false, cValid = false;
+    bool inflight = false; int reqY = 0, reqSt = 0; string reqPath; int diagE = 0, diagW = 0;
+};
+static LspState lsp;
+struct JumpPos { string path; int y, x; };
+static vector<JumpPos> jumps;
+// ações adiadas: respostas do servidor nunca abrem diálogos/arquivos de dentro de um diálogo; o laço principal as executa
+static struct { bool jump = false; string path; int line = 0, col16 = 0; bool text = false; string title, body; } defer;
+static void lspPopupUpdate(Buffer& b, bool force);
+static void lspShowPopup(Buffer& b);
+
+static void lspFlushOut() {
+    while (!lsp.out.empty() && lsp.p.alive) {
+        int w = procWriteSome(lsp.p, lsp.out.data(), (int)std::min<size_t>(lsp.out.size(), 65536)); if (w <= 0) break;
+        lsp.out.erase(0, (size_t)w);
+    }
+}
+static void lspSendRaw(const string& json) {
+    if ((lsp.state != 1 && lsp.state != 2) || !lsp.p.alive) return;
+    lsp.out += "Content-Length: " + std::to_string(json.size()) + "\r\n\r\n" + json; lspFlushOut();
+}
+static int lspRequest(int kind, const string& method, const string& params) {
+    int id = lsp.nextId++; lsp.pend[id] = kind;
+    lspSendRaw("{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id) + ",\"method\":" + jq(method) + ",\"params\":" + params + "}"); return id;
+}
+static void lspNotify(const string& method, const string& params) { lspSendRaw("{\"jsonrpc\":\"2.0\",\"method\":" + jq(method) + ",\"params\":" + params + "}"); }
+static string tdJson(const Buffer& b) { return "{\"uri\":" + jq(pathToUri(b.path)) + "}"; }
+static string posJson(const Buffer& b) { return "{\"line\":" + std::to_string(b.cy) + ",\"character\":" + std::to_string(u16FromByte(b.lines[b.cy], b.cx)) + "}"; }
+static void lspFail(const string& m, bool popup = false) {
+    procStop(lsp.p); lsp.state = 3; lsp.pend.clear(); lsp.out.clear(); lsp.in.clear(); lsp.failMsg = m; lsp.inflight = false; lsp.cValid = false;
+    for (auto& b : bufs) { b.lspOpen = false; b.diags.clear(); }
+    lsp.diagE = lsp.diagW = 0; setMsg(m.substr(0, m.find('\n')), true);
+    if (popup) { defer.text = true; defer.title = "Language server"; defer.body = m; }
+}
+static bool lspUsable(const Buffer& b) { return lsp.state == 2 && b.lspOpen && isCppFile(b.path); }
+static void lspDidOpen(Buffer& b) {
+    b.lspVer = 1; b.lspOpen = true; b.lspDirty = false; b.lspHash = textHash(b);
+    lspNotify("textDocument/didOpen", "{\"textDocument\":{\"uri\":" + jq(pathToUri(b.path)) + ",\"languageId\":\"" + (lowerA(pstr(toPath(b.path).extension())) == ".c" ? "c" : "cpp") + "\",\"version\":1,\"text\":" + jq(docText(b)) + "}}");
+}
+static void lspFlushDoc(Buffer& b) {  // envia o texto atual (versão completa) se mudou
+    if (!b.lspOpen || lsp.state != 2) return; uint64_t h = textHash(b);
+    if (h == b.lspHash && !b.lspDirty) return;
+    b.lspHash = h; b.lspDirty = false; b.lspVer++;
+    lspNotify("textDocument/didChange", "{\"textDocument\":{\"uri\":" + jq(pathToUri(b.path)) + ",\"version\":" + std::to_string(b.lspVer) + "},\"contentChanges\":[{\"text\":" + jq(docText(b)) + "}]}");
+}
+static void lspSaved(Buffer& b) {
+    if (!b.lspOpen || lsp.state != 2) return; lspFlushDoc(b); lspNotify("textDocument/didSave", "{\"textDocument\":" + tdJson(b) + "}");
+}
+static void lspClose(Buffer& b) {
+    if (b.lspOpen && lsp.state == 2) lspNotify("textDocument/didClose", "{\"textDocument\":" + tdJson(b) + "}");
+    b.lspOpen = false; b.diags.clear();
+}
+static void lspRecount() { lsp.diagE = lsp.diagW = 0; for (auto& b : bufs) for (auto& d : b.diags) { if (d.sev == 1) lsp.diagE++; else if (d.sev == 2) lsp.diagW++; } }
+static void lspDiagnostics(const J& p) {
+    string path = uriToPath(p.get("uri").str());
+    for (auto& b : bufs) {
+        if (!samePath(b.path, path)) continue; b.diags.clear(); int n = (int)b.lines.size();
+        for (auto& d : p.get("diagnostics").v) {
+            const J& r = d.get("range"); int sy = r.get("start").get("line").num(), sc = r.get("start").get("character").num(), ey = r.get("end").get("line").num(), ec = r.get("end").get("character").num();
+            if (sy < 0 || sy >= n) continue; ey = std::max(sy, std::min(ey, n - 1));
+            Diag g; g.y1 = sy; g.x1 = byteFromU16(b.lines[sy], sc); g.y2 = ey; g.x2 = byteFromU16(b.lines[ey], ec); g.sev = d.get("severity").num(1);
+            g.msg = d.get("message").str(); for (auto& c : g.msg) if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+            b.diags.push_back(g);
+        }
+    }
+    lspRecount();
+}
+static int identStart(const Buffer& b) { const string& l = b.lines[b.cy]; int st = std::min(b.cx, (int)l.size()); while (st > 0 && (isalnum((unsigned char)l[st - 1]) || l[st - 1] == '_' || (unsigned char)l[st - 1] >= 128)) st--; return st; }
+static void lspOnCompletion(const J& res, bool err) {
+    lsp.inflight = false; if (err || cur < 0 || mode != INSERT || focus != F_EDITOR) return;
+    Buffer& b = bufs[cur];
+    if (b.path != lsp.reqPath || b.cy != lsp.reqY || identStart(b) != lsp.reqSt) { lspPopupUpdate(b, false); return; }  // a posição mudou: pede de novo
+    const J& arr = res.isArr() ? res : res.get("items"); lsp.cIncomplete = res.isObj() && res.get("isIncomplete").b; lsp.items.clear();
+    int st = lsp.reqSt; bool stSet = false;
+    for (auto& it : arr.v) {
+        if (lsp.items.size() >= 300) break; LspCItem c; c.label = it.get("label").str(); c.detail = it.get("detail").str(); c.kind = it.get("kind").num(0);
+        size_t q = c.label.find_first_not_of(" \t"); c.label = q == string::npos ? string() : c.label.substr(q); if (c.label.empty()) continue;
+        c.sort = it.get("sortText").isStr() ? it.get("sortText").s : c.label; c.filter = it.get("filterText").isStr() ? it.get("filterText").s : c.label;
+        const J& te = it.get("textEdit");
+        if (te.isObj() && te.get("newText").isStr()) {
+            c.ins = te.get("newText").s;
+            if (!stSet && te.get("range").isObj() && te.get("range").get("start").get("line").num(-1) == b.cy) { st = byteFromU16(b.lines[b.cy], te.get("range").get("start").get("character").num()); stSet = true; }
+        } else c.ins = it.get("insertText").isStr() ? it.get("insertText").s : c.label;
+        size_t q2 = c.ins.find_first_not_of(" \t"); c.ins = q2 == string::npos ? c.label : c.ins.substr(q2);
+        lsp.items.push_back(c);
+    }
+    std::stable_sort(lsp.items.begin(), lsp.items.end(), [](const LspCItem& a, const LspCItem& c) { return a.sort < c.sort; });
+    lsp.cPath = b.path; lsp.cY = b.cy; lsp.cSt = std::min(st, b.cx); lsp.cValid = true; lspShowPopup(b);
+}
+static void lspOnHover(const J& res, bool err) {
+    if (err || res.t == J::NUL) { setMsg("No information at the cursor"); return; }
+    const J& c = res.get("contents"); string text;
+    auto one = [](const J& x) -> string { return x.isStr() ? x.s : x.get("value").str(); };
+    if (c.isArr()) { for (auto& x : c.v) { string t = one(x); if (!t.empty()) { if (!text.empty()) text += "\n\n"; text += t; } } } else text = one(c);
+    string out; for (auto& ln : splitLines(text)) { if (startsWith(ln, "```")) continue; out += ln; out += '\n'; }
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    if (out.empty()) { setMsg("No information at the cursor"); return; }
+    defer.text = true; defer.title = "Info"; defer.body = out;
+}
+static void lspOnDefinition(const J& res, bool err) {
+    const J& r = res.isArr() ? res.at(0) : res;
+    if (err || r.t == J::NUL) { setMsg("Definition not found", true); return; }
+    string uri = r.get("uri").isStr() ? r.get("uri").s : r.get("targetUri").str(); const J& rg = r.get("range").isObj() ? r.get("range") : r.get("targetSelectionRange");
+    string path = uriToPath(uri); if (path.empty()) { setMsg("Definition not found", true); return; }
+    if (cur >= 0) jumps.push_back({bufs[cur].path, bufs[cur].cy, bufs[cur].cx}); if (jumps.size() > 100) jumps.erase(jumps.begin());
+    defer.jump = true; defer.path = path; defer.line = rg.get("start").get("line").num(); defer.col16 = rg.get("start").get("character").num();
+}
+static void lspHandle(const J& m) {
+    const J& id = m.get("id"); const J& method = m.get("method");
+    if (method.isStr()) {
+        if (method.s == "textDocument/publishDiagnostics") lspDiagnostics(m.get("params"));
+        else if (id.t != J::NUL) lspSendRaw("{\"jsonrpc\":\"2.0\",\"id\":" + (id.t == J::NUM ? std::to_string((long long)id.n) : jq(id.s)) + ",\"result\":null}");  // pedidos do servidor: resposta vazia
+        return;
+    }
+    if (id.t != J::NUM) return;
+    auto it = lsp.pend.find((int)id.n); if (it == lsp.pend.end()) return; int kind = it->second; lsp.pend.erase(it);
+    const J& res = m.get("result"); bool err = m.get("error").t != J::NUL;
+    switch (kind) {
+    case LK_INIT:
+        if (err) { lspFail("Language server refused to start: " + m.get("error").get("message").str()); break; }
+        lspNotify("initialized", "{}"); lsp.state = 2; for (auto& b : bufs) b.lspOpen = false; break;
+    case LK_COMPL: lspOnCompletion(res, err); break;
+    case LK_HOVER: lspOnHover(res, err); break;
+    case LK_DEF: lspOnDefinition(res, err); break;
+    }
+}
+static bool lspPoll() {
+    if (lsp.state != 1 && lsp.state != 2) return false;
+    bool ch = false, eof = false; lspFlushOut(); char buf[16384];
+    for (int g = 0; g < 32; g++) { int n = procReadSome(lsp.p, buf, sizeof buf); if (n > 0) lsp.in.append(buf, (size_t)n); else { if (n < 0) eof = true; break; } }
+    for (;;) {
+        size_t he = lsp.in.find("\r\n\r\n"); if (he == string::npos) break;
+        size_t cl = lowerA(lsp.in.substr(0, he)).find("content-length:"); size_t len = 0;
+        if (cl != string::npos) len = (size_t)atol(lsp.in.c_str() + cl + 15);
+        if (len == 0) { lsp.in.erase(0, he + 4); continue; }
+        if (lsp.in.size() < he + 4 + len) break;
+        string body = lsp.in.substr(he + 4, len); lsp.in.erase(0, he + 4 + len);
+        JParser jp(body); J m = jp.val(); if (jp.ok) { lspHandle(m); ch = true; if (lsp.state != 1 && lsp.state != 2) return true; }
+    }
+    if (lsp.p.alive && procCheckExit(lsp.p)) eof = true;
+    if (eof) {
+        if (lsp.p.alive) for (int t = 0; t < 5 && !procCheckExit(lsp.p); t++) napms(20);
+        int code = lsp.p.exitCode; bool verbose = lsp.verbose;
+        if (code == 127) lspFail("clangd was not found.\nInstall it (Linux: your package manager, e.g. 'sudo apt install clangd'; Windows: 'winget install LLVM.LLVM'),\nor set the command in Project > Configure run.", verbose);
+        else lspFail("The language server stopped (code " + std::to_string(code) + "). Use Code > Restart language server.", false);
+        ch = true;
+    }
+    return ch;
+}
+static void lspStop() {
+    if (lsp.state == 2 && lsp.p.alive) {
+        lspRequest(0, "shutdown", "null"); lspNotify("exit", "null");
+        for (int t = 0; t < 10 && lsp.p.alive; t++) { lspFlushOut(); if (procCheckExit(lsp.p)) break; napms(20); }
+    }
+    procStop(lsp.p); lsp = LspState(); jumps.clear(); defer.jump = false;
+    for (auto& b : bufs) { b.lspOpen = false; b.diags.clear(); b.lspVer = 0; }
+}
+static void lspStart(bool verbose) {
+    lspStop(); lsp.verbose = verbose; if (!cfg.lspOn || root.empty() || cfg.lsp.empty()) return;
+    string cmd = cfg.lsp; std::error_code ec;
+    if (cmd.find("--compile-commands-dir") == string::npos && !fs::exists(toPath(root) / "compile_commands.json", ec)) {
+        for (const char* d : {"build", "out", "target", "cmake-build-debug", "cmake-build-release"})
+            if (fs::exists(toPath(root) / d / "compile_commands.json", ec)) { cmd += string(" --compile-commands-dir=\"") + root + SEP + d + "\""; break; }
+    }
+    if (!procSpawnPipes(lsp.p, cmd, root)) {
+        lspFail("Could not start the language server (" + cfg.lsp + ").\nInstall clangd (Linux: package manager; Windows: 'winget install LLVM.LLVM') or set the command in Project > Configure run.", verbose); return;
+    }
+    lsp.state = 1; string ru = pathToUri(root), nm = pstr(toPath(root).filename());
+    string caps = "{\"textDocument\":{\"synchronization\":{\"didSave\":true},\"completion\":{\"contextSupport\":true,\"completionItem\":{\"snippetSupport\":false,\"documentationFormat\":[\"plaintext\"]}},"
+                  "\"hover\":{\"contentFormat\":[\"plaintext\",\"markdown\"]},\"definition\":{\"linkSupport\":false},\"publishDiagnostics\":{\"relatedInformation\":false}},\"general\":{\"positionEncodings\":[\"utf-16\"]}}";
+    lspRequest(LK_INIT, "initialize", "{\"processId\":null,\"clientInfo\":{\"name\":\"vimple\"},\"rootUri\":" + jq(ru) + ",\"workspaceFolders\":[{\"uri\":" + jq(ru) + ",\"name\":" + jq(nm) + "}],\"capabilities\":" + caps + "}");
+}
+static void lspTick() {  // abre arquivos C/C++ e envia as mudanças (com debounce) — chamado só pelo laço principal
+    if (lsp.state != 2) return; long long now = lspNow();
+    for (int i = 0; i < (int)bufs.size(); i++) {
+        Buffer& b = bufs[i]; if (!isCppFile(b.path)) continue;
+        if (!b.lspOpen) { lspDidOpen(b); continue; }
+        bool vis = i == cur; for (auto& p : panes) if (p.buf == i) vis = true;
+        if (!vis) continue; uint64_t h = textHash(b);
+        if (h != b.lspHash && !b.lspDirty) { b.lspDirty = true; b.lspEdit = now; } else if (h != b.lspHash) b.lspEdit = now;
+        if (b.lspDirty && now - b.lspEdit >= 250) lspFlushDoc(b);
+    }
+}
+static string lspStatus() {
+    string s;
+    if (lsp.state == 1) s = "LSP …"; else if (lsp.state == 2) s = "LSP ●"; else if (lsp.state == 3) s = "LSP ✕"; else return "";
+    if (lsp.state == 2 && (lsp.diagE || lsp.diagW)) s += " E:" + std::to_string(lsp.diagE) + " W:" + std::to_string(lsp.diagW);
+    return s + "  ";
+}
+
+static void bgPoll() { runnerPoll(); termPoll(); lspPoll(); lspTick(); }  // tarefas de fundo (também dentro dos diálogos)
+
 // ============================================================ desenho base
 // IMPORTANTE: atributos são chtype (64 bits no PDCursesMod); guardá-los em int descarta o par de cor.
 static void put(int y, int x, const string& s, chtype attr, int maxw = 100000) {
@@ -950,14 +1690,20 @@ static void drawBox(int y0, int x0, int h, int w, const string& title) {
 
 struct MItem { string label, key; int act; };
 enum { ACT_OPEN_PROJECT = 1, ACT_NEW_FILE, ACT_NEW_DIR, ACT_SAVE, ACT_SAVE_ALL, ACT_CLOSE, ACT_QUIT, ACT_UNDO, ACT_REDO, ACT_FIND, ACT_FINDNEXT, ACT_GOTO,
-       ACT_TREE, ACT_OUT, ACT_RELTOGGLE, ACT_RUN, ACT_RUN_REL, ACT_STOP, ACT_CONFIG, ACT_REFRESH, ACT_RENAME, ACT_DELETE, ACT_DIAG };
-static const char* MENU_TITLES[4] = {"File", "Edit", "View", "Project"};
+       ACT_TREE, ACT_OUT, ACT_RELTOGGLE, ACT_RUN, ACT_RUN_REL, ACT_STOP, ACT_CONFIG, ACT_REFRESH, ACT_RENAME, ACT_DELETE, ACT_DIAG,
+       ACT_SPLIT_R, ACT_SPLIT_D, ACT_CLOSE_SPLIT, ACT_NEXT_PANE, ACT_TERM, ACT_DEF, ACT_BACK, ACT_HOVER, ACT_LSP_RESTART, ACT_LSP_TOGGLE };
+static const int NMENU = 5;
+static const char* MENU_TITLES[NMENU] = {"File", "Edit", "View", "Code", "Project"};
 static vector<MItem> menuItems(int m) {
     switch (m) {
     case 0: return {{"Open project...", "Ctrl-O", ACT_OPEN_PROJECT}, {"New file...", "Ctrl-N", ACT_NEW_FILE}, {"New folder...", "", ACT_NEW_DIR},
                 {"Save", "Ctrl-S", ACT_SAVE}, {"Save all", "", ACT_SAVE_ALL}, {"Close file", "Ctrl-W", ACT_CLOSE}, {"Quit", "Ctrl-Q", ACT_QUIT}};
     case 1: return {{"Undo", "u", ACT_UNDO}, {"Redo", "Ctrl-R", ACT_REDO}, {"Find...", "Ctrl-F", ACT_FIND}, {"Find next", "n", ACT_FINDNEXT}, {"Go to line...", "Ctrl-G", ACT_GOTO}};
-    case 2: return {{"File explorer", "Ctrl-T", ACT_TREE}, {"Output panel", "F8", ACT_OUT}, {string("Mode: ") + (releaseMode ? "Release  (switch to Debug)" : "Debug  (switch to Release)"), "", ACT_RELTOGGLE}, {"Terminal diagnostics", "", ACT_DIAG}};
+    case 2: return {{"File explorer", "Ctrl-T", ACT_TREE}, {"Output panel", "F8", ACT_OUT}, {"Terminal", "F4", ACT_TERM},
+                {"Split right  (side by side)", "F3", ACT_SPLIT_R}, {"Split down  (stacked)", "", ACT_SPLIT_D}, {"Close this split", "", ACT_CLOSE_SPLIT}, {"Next split", "F2", ACT_NEXT_PANE},
+                {string("Mode: ") + (releaseMode ? "Release  (switch to Debug)" : "Debug  (switch to Release)"), "", ACT_RELTOGGLE}, {"Mouse and color diagnostics", "F1", ACT_DIAG}};
+    case 3: return {{"Go to definition", "F12 / gd", ACT_DEF}, {"Back from definition", "gb", ACT_BACK}, {"Info under the cursor", "F11 / K", ACT_HOVER},
+                {"Restart language server", "", ACT_LSP_RESTART}, {string("Language server: ") + (cfg.lspOn ? "on  (turn off)" : "off  (turn on)"), "", ACT_LSP_TOGGLE}};
     default: return {{"Run", "F5", ACT_RUN}, {"Run (release)", "F6", ACT_RUN_REL}, {"Stop", "F7", ACT_STOP}, {"Configure run...", "F9", ACT_CONFIG}, {"Refresh explorer", "", ACT_REFRESH}};
     }
 }
@@ -967,10 +1713,13 @@ static void drawMenuBar() {
     string bt = runner.running ? " ■ Stop " : (releaseMode ? " ▶ Run · release " : " ▶ Run ");
     put(0, 0, bt, CP(runner.running ? P_BTN_STOP : P_BTN) | A_BOLD); btnW = ulen(bt);
     menuHits.clear(); int x = btnW + 1;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < NMENU; i++) {
         string t = string(" ") + MENU_TITLES[i] + " "; int w = ulen(t);
         put(0, x, t, CP(menuOpen == i ? P_MENU_ACT : P_MENU)); menuHits.push_back({x, x + w, i, 0}); x += w + 1;
     }
+    splitBtns.clear(); x++;  // botões de divisão e terminal (clicáveis)
+    struct { const char* t; int act; } bt2[] = {{" ▥ Split → ", ACT_SPLIT_R}, {" ▤ Split ↓ ", ACT_SPLIT_D}, {" ⌨ Terminal ", ACT_TERM}};
+    for (auto& bb : bt2) { string t = bb.t; int w = ulen(t); if (x + w + 12 > SW) break; bool on = bb.act == ACT_TERM && showOut && bottomTab == 1; put(0, x, t, CP(on ? P_MENU_ACT : P_BTNX)); splitBtns.push_back({x, x + w, bb.act, 0}); x += w + 1; }
     string cs = "$ " + (releaseMode ? cfg.release : cfg.run) + " "; int w = ulen(cs);
     if (x + w < SW) put(0, SW - w, cs, CP(P_HINTBAR));
 }
@@ -1011,48 +1760,98 @@ static bool isSel(const Buffer& b, int y, int i) {
     if (y < ay || y > by) return false; if (y == ay && i < ax) return false; if (y == by && i > bx) return false; return true;
 }
 static void scrollTo(Buffer& b, int tw) {
-    if (b.cy < b.top) b.top = b.cy; if (b.cy >= b.top + L.edH) b.top = b.cy - L.edH + 1; if (b.top < 0) b.top = 0;
+    if (b.cy < b.top) b.top = b.cy; if (b.cy >= b.top + AP.h) b.top = b.cy - AP.h + 1; if (b.top < 0) b.top = 0;
     int vc = vcolOf(b.lines[b.cy], b.cx); if (vc < b.left) b.left = vc; if (vc >= b.left + tw) b.left = vc - tw + 1; if (b.left < 0) b.left = 0;
 }
-static void drawEditor() {
-    fillRect(L.edY, L.edX, L.edH, L.edW, CP(P_TEXT));
-    if (cur < 0) {
-        int cy = L.edY + L.edH / 2 - 1;
-        string a = "No file open", b2 = "Pick a file in the explorer (Ctrl-E) or use  File > New file", c2 = "F10 opens the menus   ·   F5 runs the project";
-        put(cy, L.edX + std::max(0, (L.edW - ulen(a)) / 2), a, CP(P_TITLE) | A_BOLD);
-        put(cy + 2, L.edX + std::max(0, (L.edW - ulen(b2)) / 2), b2, CP(P_HINT));
-        put(cy + 3, L.edX + std::max(0, (L.edW - ulen(c2)) / 2), c2, CP(P_HINT)); return;
+// geometria dos painéis (chamada por layout())
+static void layoutPanes() {
+    if (panes.empty()) panes.assign(1, Pane()); if (activePane >= (int)panes.size()) activePane = (int)panes.size() - 1; if (activePane < 0) activePane = 0;
+    panes[activePane].buf = cur;
+    int n = (int)panes.size(), ex = L.edX, ey = L.edY, ew = L.edW, eh = L.edH;
+    if (n == 1) { Pane& p = panes[0]; p.x = p.hx = ex; p.y = ey; p.w = p.hw = ew; p.h = eh; p.hy = ey - 1; }
+    else if (splitCols) {
+        int avail = std::max(n, ew - (n - 1)), base = avail / n, extra = avail % n, x = ex;
+        for (int i = 0; i < n; i++) { Pane& p = panes[i]; int w = base + (i < extra ? 1 : 0); p.hx = p.x = x; p.hw = p.w = w; p.hy = ey; p.y = ey + 1; p.h = std::max(1, eh - 1); x += w + 1; }
+    } else {
+        int base = eh / n, extra = eh % n, y = ey;
+        for (int i = 0; i < n; i++) { Pane& p = panes[i]; int h = base + (i < extra ? 1 : 0); p.hx = p.x = ex; p.hw = p.w = ew; p.hy = y; p.y = y + 1; p.h = std::max(1, h - 1); y += h; }
     }
-    Buffer& b = bufs[cur]; int n = (int)b.lines.size();
-    int digits = std::max(3, (int)std::to_string(n).size()); gGut = digits + 2; int tx = L.edX + gGut, tw = L.edW - gGut; gTX = tx;
-    if (tw < 5) return; clampCursor(b); scrollTo(b, tw);
-    bool inb = false; for (int y = 0; y < b.top; y++) scanLine(b.lines[y], inb, nullptr);
-    for (int r = 0; r < L.edH; r++) {
-        int y = b.top + r, sy = L.edY + r;
-        if (y >= n) { put(sy, L.edX, " ~", CP(P_LINENO)); continue; }
-        bool curl = (y == b.cy) && mode != VISUAL && mode != VLINE; int bgo = curl ? 16 : 0; const string& line = b.lines[y];
+    Pane& a = panes[activePane]; AP = {a.x, a.y, a.w, a.h};
+}
+// marca de diagnóstico por coluna (1 = erro, 2 = aviso/outros) para a linha y
+static void diagMarks(const Buffer& b, int y, int len, vector<uint8_t>& m) {
+    m.assign((size_t)len, 0);
+    for (auto& d : b.diags) {
+        if (y < d.y1 || y > d.y2) continue; int xs = y == d.y1 ? d.x1 : 0, xe = y == d.y2 ? d.x2 : len; if (xe <= xs) xe = xs + 1;
+        uint8_t sv = d.sev == 1 ? 1 : 2; for (int x = std::max(0, xs); x < xe && x < len; x++) if (!m[x] || sv < m[x]) m[x] = sv;
+    }
+}
+static void drawPane(int pi) {
+    Pane& P = panes[pi]; bool act = pi == activePane, multi = panes.size() > 1;
+    if (multi) {
+        string nm = (P.buf >= 0 && P.buf < (int)bufs.size()) ? bufs[P.buf].name() + (bufs[P.buf].dirty ? " ●" : "") : "(empty)";
+        chtype ha = act ? (CP(P_TAB_ACT) | A_BOLD) : CP(P_TAB); fillRow(P.hy, P.hx, P.hw, ha); put(P.hy, P.hx, " " + nm + " ", ha, std::max(0, P.hw - 4)); put(P.hy, P.hx + P.hw - 3, " × ", ha);
+    }
+    fillRect(P.y, P.x, P.h, P.w, CP(P_TEXT));
+    if (P.buf < 0 || P.buf >= (int)bufs.size()) {
+        int cy = P.y + P.h / 2 - 1;
+        string a = act ? "No file open" : "Empty split", b2 = "Pick a file in the explorer (Ctrl-E) or use  File > New file", c2 = "F10 opens the menus   ·   F5 runs the project";
+        put(cy, P.x + std::max(0, (P.w - ulen(a)) / 2), a, CP(P_TITLE) | A_BOLD, P.w);
+        if (act) { put(cy + 2, P.x + std::max(0, (P.w - ulen(b2)) / 2), b2, CP(P_HINT), P.w); put(cy + 3, P.x + std::max(0, (P.w - ulen(c2)) / 2), c2, CP(P_HINT), P.w); }
+        return;
+    }
+    Buffer& b = bufs[P.buf]; int n = (int)b.lines.size();
+    int gut = gutOf(b), digits = gut - 2, tx = P.x + gut, tw = P.w - gut; if (tw < 5) return;
+    int& top = act ? b.top : P.top; int& left = act ? b.left : P.left;
+    if (act) { clampCursor(b); scrollTo(b, tw); gTX = tx; } else { top = std::max(0, std::min(top, n - 1)); left = std::max(0, left); }
+    bool inb = false; for (int y = 0; y < top; y++) scanLine(b.lines[y], inb, nullptr);
+    vector<uint8_t> dm;
+    for (int r = 0; r < P.h; r++) {
+        int y = top + r, sy = P.y + r;
+        if (y >= n) { put(sy, P.x, " ~", CP(P_LINENO)); continue; }
+        bool curl = act && (y == b.cy) && mode != VISUAL && mode != VLINE; int bgo = curl ? 16 : 0; const string& line = b.lines[y];
         fillRow(sy, tx, tw, CP(P_SYN + bgo));
-        attrset(CP(y == b.cy ? P_LINENO_CUR : P_LINENO)); mvprintw(sy, L.edX, " %*d ", digits, y + 1);
+        attrset(CP(act && y == b.cy ? P_LINENO_CUR : P_LINENO)); mvprintw(sy, P.x, " %*d ", digits, y + 1);
         vector<uint8_t> col; scanLine(line, inb, &col); int vc = 0, len = (int)line.size();
+        diagMarks(b, y, len, dm); uint8_t worst = 0; for (uint8_t v : dm) if (v && (!worst || v < worst)) worst = v;
+        if (b.diags.size() && worst == 0) for (auto& d : b.diags) if (y >= d.y1 && y <= d.y2) { worst = d.sev == 1 ? 1 : 2; break; }
+        if (worst) put(sy, P.x, "●", CP(worst == 1 ? P_ERR : P_WARN) | A_BOLD);
         for (int i = 0; i < len;) {
             int cl = std::min(cplen((unsigned char)line[i]), len - i); int w = line[i] == '\t' ? 4 - (vc % 4) : 1;
-            chtype attr = isSel(b, y, i) ? CP(P_SEL) : CP(P_SYN + bgo + col[i]);
+            chtype attr = (act && isSel(b, y, i)) ? CP(P_SEL) : CP(P_SYN + bgo + col[i]);
+            if (dm[i] && !(act && isSel(b, y, i))) attr = CP(dm[i] == 1 ? P_ERR : P_WARN) | A_UNDERLINE;
             for (int k = 0; k < w; k++) {
-                int sx = vc + k - b.left; if (sx < 0 || sx >= tw) continue; attrset(attr);
+                int sx = vc + k - left; if (sx < 0 || sx >= tw) continue; attrset(attr);
                 if (line[i] == '\t') mvaddch(sy, tx + sx, ' '); else mvaddnstr(sy, tx + sx, line.c_str() + i, cl);
             }
             vc += w; i += cl;
         }
     }
-    curSY = L.edY + b.cy - b.top; curSX = tx + vcolOf(b.lines[b.cy], b.cx) - b.left;
+    if (act) { curSY = P.y + b.cy - top; curSX = tx + vcolOf(b.lines[b.cy], b.cx) - left; }
 }
-static void drawOut() {
-    int y0 = L.outY, h = L.outH; fillRow(y0, 0, SW, CP(P_BAR));
-    string t = " OUTPUT  $ " + outTitle + (runner.running ? "   ● running" : ""); put(y0, 0, t, CP(P_BAR) | A_BOLD);
-    put(y0, SW - 24, " click to jump to error ", CP(P_HINTBAR));
-    int rows = h - 1, total = (int)outLines.size();
+static void drawEditor() {
+    for (int i = 0; i < (int)panes.size(); i++) drawPane(i);
+    if (panes.size() > 1 && splitCols) for (int i = 0; i + 1 < (int)panes.size(); i++) { attrset(CP(P_SEP)); mvvline(L.edY, panes[i].x + panes[i].w, ACS_VLINE, L.edH); }
+}
+static void tAppendRun(string& run, uint32_t ch) { appendUtf8(run, ch ? ch : ' '); }
+static void drawTermBody(int y0, int rows) {
+    int total = (int)term.sb.size(); if (term.alt) term.scrollOff = 0; term.scrollOff = std::max(0, std::min(term.scrollOff, total));
+    for (int r = 0; r < rows; r++) {
+        fillRow(y0 + r, 0, SW, CP(P_TEXT)); int idx = total - term.scrollOff + r; const vector<TCell>* rp = nullptr;
+        if (idx < total) { if (idx >= 0) rp = &term.sb[(size_t)idx]; } else if (idx - total < (int)term.grid.size()) rp = &term.grid[(size_t)(idx - total)];
+        if (!rp) continue; const vector<TCell>& row = *rp; int W = std::min(SW, (int)row.size()), x = 0, c = 0;
+        while (c < W) {
+            uint8_t fg = row[c].fg, fl = row[c].fl; string run; int d = c;
+            while (d < W && row[d].fg == fg && row[d].fl == fl) { tAppendRun(run, row[d].ch); d++; }
+            chtype at = CP(P_TERM + (fg == 8 ? 7 : fg)); if (fl & 1) at |= A_BOLD; if (fl & 2) at |= A_REVERSE; if (fl & 4) at |= A_UNDERLINE;
+            attrset(at); mvaddnstr(y0 + r, x, run.c_str(), (int)run.size()); x += d - c; c = d;
+        }
+    }
+}
+static void drawOutBody(int y0, int rows) {
+    int total = (int)outLines.size();
     int first = outScroll < 0 ? std::max(0, total - rows) : std::min(outScroll, std::max(0, total - rows)); outFirst = first;
-    fillRect(y0 + 1, 0, rows, SW, CP(P_TEXT));
+    fillRect(y0, 0, rows, SW, CP(P_TEXT));
     for (int r = 0; r < rows; r++) {
         int i = first + r; if (i >= total) break; const string& s = outLines[i]; chtype attr = CP(P_TEXT);
         string low; for (char c : s) low += (char)tolower((unsigned char)c);
@@ -1062,18 +1861,29 @@ static void drawOut() {
         else if (low.find("error") != string::npos || low.find("erro") != string::npos) attr = CP(P_ERR);
         else if (low.find("warning") != string::npos) attr = CP(P_WARN);
         else if (low.find("note:") != string::npos) attr = CP(P_NOTE);
-        put(y0 + 1 + r, 1, s, attr, SW - 1);
+        put(y0 + r, 1, s, attr, SW - 1);
     }
+}
+static void drawOut() {  // painel inferior: abas "Output" e "Terminal"
+    int y0 = L.outY; fillRow(y0, 0, SW, CP(P_BAR)); botHits.clear(); int x = 0;
+    const char* names[2] = {" OUTPUT ", " TERMINAL "};
+    for (int i = 0; i < 2; i++) { string t = names[i]; int w = ulen(t); put(y0, x, t, i == bottomTab ? (CP(P_TAB_ACT) | A_BOLD) : CP(P_TAB)); botHits.push_back({x, x + w, i, 0}); x += w + 1; }
+    string info = bottomTab == 0 ? ("$ " + outTitle + (runner.running ? "   ● running" : "")) : (term.exited ? string("process exited — press a key") : (term.alt ? string("") : string(term.scrollOff > 0 ? "scrollback (wheel)" : "F4 returns to the editor")));
+    put(y0, x + 1, info, CP(P_BAR), std::max(0, SW - x - 8));
+    string cb = " × "; put(y0, SW - 3, cb, CP(P_BTNX)); botHits.push_back({SW - 3, SW, 2, 0});
+    int rows = L.outH - 1; if (rows < 1) return;
+    if (bottomTab == 0) drawOutBody(y0 + 1, rows); else drawTermBody(y0 + 1, rows);
 }
 static void drawStatus() {
     fillRow(L.statY, 0, SW, CP(P_BAR)); string ml; int mp = P_MODE_N;
     if (focus == F_TREE) { ml = " EXPLORER "; mp = P_MODE_T; }
+    else if (focus == F_TERM) { ml = " TERMINAL "; mp = P_MODE_T; }
     else if (mode == INSERT) { ml = " INSERT "; mp = P_MODE_I; } else if (mode == VISUAL) { ml = " VISUAL "; mp = P_MODE_V; }
     else if (mode == VLINE) { ml = " VISUAL LINE "; mp = P_MODE_V; } else ml = " NORMAL ";
     put(L.statY, 0, ml, CP(mp) | A_BOLD); int x = ulen(ml) + 1;
     if (cur >= 0) { put(L.statY, x, bufs[cur].name() + (bufs[cur].dirty ? " [+]" : ""), CP(P_BAR)); }
     if (runner.running) put(L.statY, std::max(x + 24, SW / 2 - 6), "● running", CP(P_BAR) | A_BOLD);
-    string right = releaseMode ? "release  " : "debug  ";
+    string right = lspStatus() + (releaseMode ? "release  " : "debug  ");
     if (cur >= 0) { Buffer& b = bufs[cur]; right += "Ln " + std::to_string(b.cy + 1) + "/" + std::to_string(b.lines.size()) + "  Col " + std::to_string(vcolOf(b.lines[b.cy], b.cx) + 1) + "  C++ "; }
     put(L.statY, SW - ulen(right), right, CP(P_BAR));
 }
@@ -1081,10 +1891,11 @@ static void drawMsg() {
     fillRow(L.msgY, 0, SW, CP(P_TEXT));
     if (!msg.empty()) { put(L.msgY, 1, msg, CP(msgErr ? P_ERR : P_OK) | A_BOLD); return; }
     string h;
-    if (focus == F_TREE) h = "Enter open · a new file · A new folder · r rename · d delete · Esc back to editor";
+    if (focus == F_TERM) h = "Terminal: keys go to the shell · F4 back to the editor · F10 menu · Ctrl-V paste · wheel scrolls";
+    else if (focus == F_TREE) h = "Enter open · a new file · A new folder · r rename · d delete · Esc back to editor";
     else if (mode == INSERT) h = "Esc normal · Ctrl-Z/Y undo/redo · Ctrl-C/X/V copy/cut/paste · mouse selects · Ctrl-N autocomplete · Ctrl-S save";
     else if (mode == VISUAL || mode == VLINE) h = "y/Ctrl-C copy · d delete · > < indent · Esc cancel";
-    else h = "i insert · v visual · dd delete line · u undo · Ctrl-F find · Ctrl-S save · F5 run · F10 menu";
+    else h = "i insert · v visual · dd delete line · u undo · gd definition · K info · Ctrl-F find · Ctrl-S save · F3 split · F4 terminal · F5 run · F10 menu";
     put(L.msgY, 1, h, CP(P_HINT));
 }
 static void drawMenuDropdown() {
@@ -1102,8 +1913,8 @@ static void drawPopup() {
     if (!pop.on || cur < 0 || focus != F_EDITOR || mode != INSERT || menuOpen >= 0) return;
     Buffer& b = bufs[cur]; int total = (int)pop.items.size(), n = std::min(total, 8), w = 0;
     for (auto& s : pop.items) w = std::max(w, std::min(ulen(s) + 2, 42)); w = std::max(w, 12);
-    int x = gTX + vcolOf(b.lines[b.cy], pop.start) - b.left; if (x + w > SW) x = std::max(0, SW - w);
-    int y = curSY + 1; if (y + n > L.edY + L.edH) y = curSY - n; if (y < L.edY) y = curSY + 1;
+    int x = gTX + vcolOf(b.lines[b.cy], std::min(pop.start, (int)b.lines[b.cy].size())) - b.left; if (x + w > SW) x = std::max(0, SW - w);
+    int y = curSY + 1; if (y + n > AP.y + AP.h) y = curSY - n; if (y < AP.y) y = curSY + 1;
     int first = pop.sel >= n ? pop.sel - n + 1 : 0;
     for (int i = 0; i < n; i++) {
         int idx = first + i; chtype attr = CP(idx == pop.sel ? P_POPSEL : P_POP); fillRow(y + i, x, w, attr); put(y + i, x + 1, pop.items[idx], attr, w - 2);
@@ -1117,6 +1928,7 @@ static void drawStart() {
 static void render() {
     layout();
     if (root.empty()) { drawStart(); return; }
+    if (showOut && bottomTab == 1) termFit();
     erase(); drawMenuBar(); drawTabs(); if (showTree) drawTree(); drawEditor(); if (showOut) drawOut(); drawStatus(); drawMsg(); drawMenuDropdown(); drawPopup();
 }
 static void drawAll() {
@@ -1132,7 +1944,7 @@ static int dialog(const string& title, const string& body, vector<DField>& f, co
     int nf = (int)f.size(), nb = (int)btns.size(), foc = nf > 0 ? 0 : nf + defBtn; vector<string> bl = body.empty() ? vector<string>() : splitLines(body);
     menuOpen = -1;
     for (;;) {
-        runnerPoll(); render();
+        bgPoll(); render();
         int bw = 0; for (auto& b : btns) bw += ulen(b) + 5; int bodyW = 0; for (auto& s : bl) bodyW = std::max(bodyW, ulen(s));
         int w = std::min(SW - 2, std::max({54, bw + 6, bodyW + 6})); int rows = 0; for (auto& d : f) rows += d.isCheck ? 2 : 3;
         int h = 2 + (bl.empty() ? 0 : (int)bl.size() + 1) + rows + 2; int y0 = std::max(0, (SH - h) / 2), x0 = std::max(0, (SW - w) / 2);
@@ -1236,7 +2048,7 @@ static bool pickFolder(const string& startDir, string& out) {
             for (auto& d : dirs) items.push_back({pstr(d.second.filename()) + SEP, d.second, 0});
         }
         if (sel >= (int)items.size()) sel = (int)items.size() - 1; if (sel < 0) sel = 0;
-        runnerPoll(); render();
+        bgPoll(); render();
         int w = std::min(SW - 4, 72), h = std::min(SH - 2, 24); int y0 = std::max(0, (SH - h) / 2), x0 = std::max(0, (SW - w) / 2);
         drawBox(y0, x0, h, w, atDrives ? "Open project — choose a drive" : "Open project — choose a folder");
         put(y0 + 1, x0 + 2, atDrives ? string("This computer — available drives") : tailClip(pstr(curp), w - 4), CP(P_DLGT) | A_BOLD, w - 4);
@@ -1303,9 +2115,40 @@ static bool pickFolder(const string& startDir, string& out) {
 
 // ============================================================ autocomplete
 static bool isWordCh(char c) { return isalnum((unsigned char)c) || c == '_' || (unsigned char)c >= 128; }
+static void lspShowPopup(Buffer& b) {  // filtra os itens do servidor pelo prefixo digitado
+    pop.on = false; pop.items.clear(); pop.ins.clear(); pop.sel = 0; if (!lsp.cValid || b.path != lsp.cPath || b.cy != lsp.cY) return;
+    const string& l = b.lines[b.cy]; if (lsp.cSt > b.cx || lsp.cSt > (int)l.size()) return;
+    string pre = lowerA(l.substr(lsp.cSt, b.cx - lsp.cSt));
+    vector<const LspCItem*> a, c;
+    for (auto& it : lsp.items) {
+        string f = lowerA(it.filter); size_t q = pre.empty() ? 0 : f.find(pre);
+        if (pre.empty() || q == 0) a.push_back(&it); else if (q != string::npos) c.push_back(&it);
+    }
+    for (int pass = 0; pass < 2; pass++) for (auto* it : (pass ? c : a)) {
+            if (pop.items.size() >= 80) break; string lb = it->label + (it->detail.empty() ? string() : "  " + it->detail);
+            pop.items.push_back(lb); pop.ins.push_back(it->ins);
+        }
+    pop.start = lsp.cSt; pop.on = !pop.items.empty();
+}
+static void lspPopupUpdate(Buffer& b, bool force) {
+    pop.on = false; pop.items.clear(); pop.ins.clear(); pop.sel = 0; const string& l = b.lines[b.cy]; int cx = b.cx, st = identStart(b);
+    bool member = st > 0 && (l[st - 1] == '.' || (l[st - 1] == '>' && st > 1 && l[st - 2] == '-') || (l[st - 1] == ':' && st > 1 && l[st - 2] == ':'));
+    if (cx - st < 1 && !member && !force) { lsp.cValid = false; return; }
+    if (cx - st > 0 && isdigit((unsigned char)l[st])) return;
+    if (lsp.cValid && b.path == lsp.cPath && b.cy == lsp.cY && lsp.cSt <= cx && !lsp.cIncomplete) {
+        bool word = true; for (int i = lsp.cSt; i < cx; i++) if (!isWordCh(l[i])) word = false;
+        if (word) { lspShowPopup(b); return; }
+    }
+    if (lsp.inflight) return;
+    lspFlushDoc(b); lsp.inflight = true; lsp.reqY = b.cy; lsp.reqSt = st; lsp.reqPath = b.path; lsp.cValid = false;
+    string ctx = member ? "{\"triggerKind\":2,\"triggerCharacter\":\"" + string(l[st - 1] == '.' ? "." : l[st - 1] == '>' ? ">" : ":") + "\"}" : "{\"triggerKind\":1}";
+    lspRequest(LK_COMPL, "textDocument/completion", "{\"textDocument\":" + tdJson(b) + ",\"position\":" + posJson(b) + ",\"context\":" + ctx + "}");
+}
 static void updatePopup(Buffer& b, bool force) {
-    pop.on = false; pop.items.clear(); pop.sel = 0; const string& l = b.lines[b.cy]; int cx = b.cx;
+    pop.on = false; pop.items.clear(); pop.ins.clear(); pop.sel = 0; const string& l = b.lines[b.cy]; int cx = b.cx;
     size_t s = l.find_first_not_of(" \t");
+    bool inc = s != string::npos && l.compare(s, 8, "#include") == 0 && (int)(s + 8) <= cx;
+    if (!inc && lspUsable(b)) { lspPopupUpdate(b, force); return; }
     if (s != string::npos && l.compare(s, 8, "#include") == 0 && (int)(s + 8) <= cx) {
         int pos = -1; for (int i = cx - 1; i >= (int)s + 8; i--) { if (l[i] == '<' || l[i] == '"') { pos = i; break; } if (l[i] == '>') break; }
         if (pos < 0) return; string pre = l.substr(pos + 1, cx - pos - 1);
@@ -1333,7 +2176,7 @@ static void updatePopup(Buffer& b, bool force) {
     if (prim.size() > 60) prim.resize(60); pop.items = prim; pop.start = st; pop.on = !pop.items.empty();
 }
 static void acceptPopup(Buffer& b) {
-    if (!pop.on) return; string item = pop.items[pop.sel]; string& l = b.lines[b.cy]; char open = pop.start > 0 ? l[pop.start - 1] : 0;
+    if (!pop.on) return; string item = pop.ins.size() == pop.items.size() ? pop.ins[pop.sel] : pop.items[pop.sel]; string& l = b.lines[b.cy]; char open = pop.start > 0 ? l[pop.start - 1] : 0;
     l.replace(pop.start, b.cx - pop.start, item); b.cx = pop.start + (int)item.size();
     if (open == '<' && (b.cx >= (int)l.size() || l[b.cx] != '>')) { l.insert(b.cx, ">"); b.cx++; }
     else if (open == '"' && (b.cx >= (int)l.size() || l[b.cx] != '"')) { l.insert(b.cx, "\""); b.cx++; }
@@ -1432,13 +2275,13 @@ static void doFind() {
     if (cur < 0) return; vector<DField> f = {{"Search for:", lastSearch}};
     if (dialog("Find", "", f, {"Find", "Cancel"}) != 0 || f[0].text.empty()) return;
     lastSearch = f[0].text; Buffer& b = bufs[cur];
-    if (searchDir(b, lastSearch, true)) { b.top = std::max(0, b.cy - L.edH / 2); setWant(b); focus = F_EDITOR; } else setMsg("Not found: " + lastSearch, true);
+    if (searchDir(b, lastSearch, true)) { b.top = std::max(0, b.cy - AP.h / 2); setWant(b); focus = F_EDITOR; } else setMsg("Not found: " + lastSearch, true);
 }
 static void doGoto() {
     if (cur < 0) return; vector<DField> f = {{"Line number:", ""}};
     if (dialog("Go to line", "Lines: 1 to " + std::to_string(bufs[cur].lines.size()), f, {"Go", "Cancel"}) != 0) return;
     int n = atoi(f[0].text.c_str()); if (n < 1) return; Buffer& b = bufs[cur]; b.cy = std::min(n - 1, (int)b.lines.size() - 1); b.cx = firstNonBlank(b.lines[b.cy]);
-    clampCursor(b); b.top = std::max(0, b.cy - L.edH / 2); setWant(b); focus = F_EDITOR;
+    clampCursor(b); b.top = std::max(0, b.cy - AP.h / 2); setWant(b); focus = F_EDITOR;
 }
 static bool motionKey(Buffer& b, int ch, int n, bool hadCount) {
     string& l = b.lines[b.cy];
@@ -1458,10 +2301,10 @@ static bool motionKey(Buffer& b, int ch, int n, bool hadCount) {
     case '{': { int y = b.cy; while (y > 0 && b.lines[y].empty()) y--; while (y > 0 && !b.lines[y].empty()) y--; b.cy = y; b.cx = 0; setWant(b); return true; }
     case '%': matchBracket(b); setWant(b); return true;
     case 'n': case 'N': if (lastSearch.empty()) { setMsg("Use Ctrl-F to search", true); return true; } if (!searchDir(b, lastSearch, ch == 'n')) setMsg("Not found: " + lastSearch, true); setWant(b); return true;
-    case 4: moveVert(b, L.edH / 2); return true;
-    case 21: moveVert(b, -L.edH / 2); return true;
-    case KEY_NPAGE: moveVert(b, L.edH); return true;
-    case KEY_PPAGE: moveVert(b, -L.edH); return true;
+    case 4: moveVert(b, AP.h / 2); return true;
+    case 21: moveVert(b, -AP.h / 2); return true;
+    case KEY_NPAGE: moveVert(b, AP.h); return true;
+    case KEY_PPAGE: moveVert(b, -AP.h); return true;
     }
     return false;
 }
@@ -1497,6 +2340,8 @@ static void pendCmd(Buffer& b, char p, int ch, int n) {
         break;
     case 'g':
         if (ch == 'g') { b.cy = n > 1 ? std::min(n - 1, (int)b.lines.size() - 1) : 0; b.cx = firstNonBlank(b.lines[b.cy]); setWant(b); }
+        else if (ch == 'd') doDefinition();
+        else if (ch == 'b') doBack();
         else if (ch == 't' && bufs.size() > 1) { cur = (cur + 1) % (int)bufs.size(); }
         else if (ch == 'T' && bufs.size() > 1) { cur = (cur + (int)bufs.size() - 1) % (int)bufs.size(); }
         break;
@@ -1505,7 +2350,7 @@ static void pendCmd(Buffer& b, char p, int ch, int n) {
         break;
     case '>': if (ch == '>') indentLines(b, b.cy, n, true); break;
     case '<': if (ch == '<') indentLines(b, b.cy, n, false); break;
-    case 'z': if (ch == 'z') b.top = std::max(0, b.cy - L.edH / 2); break;
+    case 'z': if (ch == 'z') b.top = std::max(0, b.cy - AP.h / 2); break;
     }
     if (cur >= 0 && cur < (int)bufs.size()) { Buffer& bb = bufs[cur]; clampCursor(bb); if (p != 'd' || ch != 'd') setWant(bb); }
 }
@@ -1537,6 +2382,7 @@ static void normalKey(int ch) {
     case 'v': mode = VISUAL; vsy = b.cy; vsx = b.cx; break;
     case 'V': mode = VLINE; vsy = b.cy; vsx = b.cx; break;
     case '/': doFind(); break;
+    case 'K': doHover(); break;
     case 'd': case 'y': case 'c': case 'g': case 'r': case '>': case '<': case 'z': pend = (char)ch; pendN = n; break;
     }
     if (cur >= 0) { Buffer& bb = bufs[cur]; clampCursor(bb); }
@@ -1578,12 +2424,71 @@ static bool confirmDiscard(const string& what) {
     int r = msgBox(what, body, {"Save all", "Discard", "Cancel"});
     if (r == 0) { saveAll(); return true; } return r == 1;
 }
+// ---- divisão de tela
+static bool paneBufOk(int b) { return b >= 0 && b < (int)bufs.size(); }
+static void setActivePane(int i) {
+    if (i < 0 || i >= (int)panes.size() || i == activePane) return;
+    Pane& o = panes[activePane]; if (paneBufOk(cur)) { o.top = bufs[cur].top; o.left = bufs[cur].left; } o.buf = cur;
+    activePane = i; Pane& n = panes[i]; cur = paneBufOk(n.buf) ? n.buf : -1;
+    if (cur >= 0) { bufs[cur].top = n.top; bufs[cur].left = n.left; }
+    mode = NORMAL; pop.on = false; insSel = false; insKind = 0; layoutPanes();
+}
+static void doSplit(bool right) {
+    if (panes.size() >= 4) { setMsg("At most 4 splits — close one first", true); return; }
+    Pane o = panes[activePane]; if (paneBufOk(cur)) { o.top = bufs[cur].top; o.left = bufs[cur].left; } o.buf = cur; panes[activePane] = o;
+    splitCols = right; Pane np = o; panes.insert(panes.begin() + activePane + 1, np); activePane++; mode = NORMAL; pop.on = false; layoutPanes();
+    setMsg(right ? "Split created — open another file in it from the explorer, or click a tab" : "Split created below — open another file in it from the explorer, or click a tab");
+}
+static void closePane(int i) {
+    if (panes.size() <= 1) { setMsg("There is no split to close"); return; }
+    bool was = i == activePane; panes.erase(panes.begin() + i);
+    if (was) { activePane = std::min(i, (int)panes.size() - 1); Pane& n = panes[activePane]; cur = paneBufOk(n.buf) ? n.buf : -1; if (cur >= 0) { bufs[cur].top = n.top; bufs[cur].left = n.left; } mode = NORMAL; pop.on = false; insSel = false; }
+    else if (i < activePane) activePane--;
+    layoutPanes();
+}
+// ---- terminal
+static void toggleTerminal() {
+    if (showOut && bottomTab == 1 && focus == F_TERM) { showOut = false; focus = cur >= 0 ? F_EDITOR : F_TREE; return; }
+    showOut = true; bottomTab = 1; layout(); if (!term.started) termStart(); focus = F_TERM; mode = mode == INSERT ? NORMAL : mode; pop.on = false;
+}
+// ---- LSP: ações do usuário
+static bool lspReadyMsg() {
+    if (cur < 0) return false; Buffer& b = bufs[cur];
+    if (!cfg.lspOn) { setMsg("Language server is off — turn it on in the Code menu", true); return false; }
+    if (!isCppFile(b.path)) { setMsg("The language server only handles C/C++ files", true); return false; }
+    if (lsp.state == 1) { setMsg("The language server is still starting…"); return false; }
+    if (lsp.state == 3) { setMsg("Language server not running — Code > Restart language server", true); return false; }
+    if (lsp.state != 2 || !b.lspOpen) { setMsg("The language server has not loaded this file yet", true); return false; }
+    return true;
+}
+static void doDefinition() {
+    if (!lspReadyMsg()) return; Buffer& b = bufs[cur]; lspFlushDoc(b);
+    lspRequest(LK_DEF, "textDocument/definition", "{\"textDocument\":" + tdJson(b) + ",\"position\":" + posJson(b) + "}"); setMsg("Looking up definition…");
+}
+static void doHover() {
+    if (!lspReadyMsg()) return; Buffer& b = bufs[cur]; lspFlushDoc(b);
+    lspRequest(LK_HOVER, "textDocument/hover", "{\"textDocument\":" + tdJson(b) + ",\"position\":" + posJson(b) + "}"); setMsg("Asking the language server…");
+}
+static void doBack() {
+    if (jumps.empty()) { setMsg("Nowhere to go back to"); return; }
+    JumpPos j = jumps.back(); jumps.pop_back(); selectPath(j.path); openFile(j.path, j.y + 1, j.x + 1);
+}
+static void runDeferred() {  // só o laço principal chama: abre arquivos / mostra diálogos pedidos por respostas do servidor
+    if (defer.jump) {
+        defer.jump = false; string p = defer.path; int line = defer.line, c16 = defer.col16;
+        std::error_code ec; if (!fs::is_regular_file(toPath(p), ec)) { setMsg("Definition is in a file that cannot be opened: " + p, true); }
+        else { selectPath(p); if (openFile(p, line + 1, 0) && cur >= 0) { Buffer& b = bufs[cur]; b.cx = byteFromU16(b.lines[b.cy], c16); clampCursor(b); setWant(b); b.top = std::max(0, b.cy - AP.h / 2); } }
+    }
+    if (defer.text) { defer.text = false; string t = defer.title, bd = defer.body; if ((int)splitLines(bd).size() > 14) { auto v = splitLines(bd); v.resize(14); bd.clear(); for (auto& l : v) bd += l + "\n"; bd += "…"; } msgBox(t, bd, {"OK"}); }
+}
 static void closeBuffer(int i) {
     if (i < 0 || i >= (int)bufs.size()) return;
     if (bufs[i].dirty) {
         int r = msgBox("Close file", "Save changes to " + bufs[i].name() + "?", {"Save", "Discard", "Cancel"});
         if (r == 0) saveBuffer(bufs[i]); else if (r != 1) return;
     }
+    lspClose(bufs[i]);
+    for (auto& pn : panes) { if (pn.buf == i) pn.buf = -1; else if (pn.buf > i) pn.buf--; }
     bufs.erase(bufs.begin() + i); if (bufs.empty()) { cur = -1; focus = F_TREE; } else cur = std::min(cur >= i && cur > 0 ? cur - 1 : cur, (int)bufs.size() - 1);
     mode = NORMAL; pop.on = false;
 }
@@ -1616,11 +2521,16 @@ static void doDelete() {
     refreshTree(); setMsg("Deleted: " + n.name);
 }
 static void doConfig() {
-    vector<DField> f = {{"Run command (blue button / F5):", cfg.run}, {"Release command (F6 / release mode):", cfg.release}, {"Run in full terminal (interactive programs)", "", true, cfg.terminal}};
+    vector<DField> f = {{"Run command (blue button / F5):", cfg.run}, {"Release command (F6 / release mode):", cfg.release}, {"Run in full terminal (interactive programs)", "", true, cfg.terminal},
+                        {"Terminal shell (empty = system default):", cfg.shell}, {"Language server command (clangd):", cfg.lsp}, {"Enable the language server", "", true, cfg.lspOn}};
     for (;;) {
-        int r = dialog("Configure run", "Runs in the project folder. Default: rsfmake run  /  rsfmake run -r", f, {"Save", "Default", "Cancel"});
-        if (r == 1) { f[0].text = "rsfmake run"; f[1].text = "rsfmake run -r"; f[2].check = false; continue; }
-        if (r != 0) return; cfg.run = f[0].text; cfg.release = f[1].text; cfg.terminal = f[2].check; saveConfig(); setMsg("Settings saved to .vimple.conf"); return;
+        int r = dialog("Configure", "Runs in the project folder. Default: rsfmake run  /  rsfmake run -r", f, {"Save", "Default", "Cancel"});
+        if (r == 1) { f[0].text = "rsfmake run"; f[1].text = "rsfmake run -r"; f[2].check = false; f[3].text = ""; f[4].text = Config().lsp; f[5].check = true; continue; }
+        if (r != 0) return;
+        bool lspChanged = cfg.lsp != f[4].text || cfg.lspOn != f[5].check;
+        cfg.run = f[0].text; cfg.release = f[1].text; cfg.terminal = f[2].check; cfg.shell = f[3].text; cfg.lsp = f[4].text; cfg.lspOn = f[5].check; saveConfig();
+        if (lspChanged) lspStart(false);
+        setMsg("Settings saved to .vimple.conf" + string(term.started && !f[3].text.empty() ? " (the shell change applies to the next terminal)" : "")); return;
     }
 }
 static void doOpenProject() {
@@ -1692,7 +2602,7 @@ static void doAction(int a) {
     case ACT_FINDNEXT: if (cur >= 0) { if (lastSearch.empty()) doFind(); else if (!searchDir(bufs[cur], lastSearch, true)) setMsg("Not found", true); } break;
     case ACT_GOTO: doGoto(); break;
     case ACT_TREE: showTree = !showTree; if (!showTree) focus = F_EDITOR; else if (cur < 0) focus = F_TREE; break;
-    case ACT_OUT: showOut = !showOut; break;
+    case ACT_OUT: if (showOut && bottomTab == 0) showOut = false; else { showOut = true; bottomTab = 0; } if (focus == F_TERM) focus = cur >= 0 ? F_EDITOR : F_TREE; break;
     case ACT_RELTOGGLE: releaseMode = !releaseMode; setMsg(releaseMode ? "Release mode: the Run button uses the release command" : "Debug mode: the Run button uses the default command"); break;
     case ACT_RUN: startRun(false); break;
     case ACT_RUN_REL: startRun(true); break;
@@ -1702,6 +2612,16 @@ static void doAction(int a) {
     case ACT_RENAME: doRename(); break;
     case ACT_DELETE: doDelete(); break;
     case ACT_DIAG: doDiag(); break;
+    case ACT_SPLIT_R: doSplit(true); break;
+    case ACT_SPLIT_D: doSplit(false); break;
+    case ACT_CLOSE_SPLIT: closePane(activePane); break;
+    case ACT_NEXT_PANE: if (panes.size() > 1) { setActivePane((activePane + 1) % (int)panes.size()); focus = cur >= 0 ? F_EDITOR : focus; } else setMsg("No splits yet — use View > Split right"); break;
+    case ACT_TERM: toggleTerminal(); break;
+    case ACT_DEF: doDefinition(); break;
+    case ACT_BACK: doBack(); break;
+    case ACT_HOVER: doHover(); break;
+    case ACT_LSP_RESTART: if (!cfg.lspOn) { cfg.lspOn = true; saveConfig(); } lspStart(true); setMsg("Restarting the language server…"); break;
+    case ACT_LSP_TOGGLE: cfg.lspOn = !cfg.lspOn; saveConfig(); lspStart(false); setMsg(cfg.lspOn ? "Language server on" : "Language server off"); break;
     }
 }
 
@@ -1746,15 +2666,29 @@ static void handleMouse() {
     }
     if (up || dn) {
         int d = up ? -1 : 1;
-        if (showOut && y >= L.outY && y < L.statY) { int rows = L.outH - 1, total = (int)outLines.size(); int f = outScroll < 0 ? outFirst : outScroll; f = std::max(0, f + d * 3); if (f >= total - rows) outScroll = -1; else outScroll = f; }
+        if (showOut && y >= L.outY && y < L.statY) {
+            if (bottomTab == 1) {
+                if (term.alt) { for (int k = 0; k < 3; k++) termSend(d < 0 ? (term.appCursor ? "\x1bOA" : "\x1b[A") : (term.appCursor ? "\x1bOB" : "\x1b[B")); }
+                else term.scrollOff = std::max(0, std::min((int)term.sb.size(), term.scrollOff - d * 3));
+            } else { int rows = L.outH - 1, total = (int)outLines.size(); int f = outScroll < 0 ? outFirst : outScroll; f = std::max(0, f + d * 3); if (f >= total - rows) outScroll = -1; else outScroll = f; }
+        }
         else if (showTree && x < L.treeW && y >= L.edY && y < L.outY) treeSel = std::max(0, std::min((int)tree.size() - 1, treeSel + d * 3));
-        else if (cur >= 0) { Buffer& b = bufs[cur]; b.top = std::max(0, std::min((int)b.lines.size() - 1, b.top + d * 3)); b.cy = std::max(b.top, std::min(b.cy, b.top + L.edH - 1)); b.cy = std::min(b.cy, (int)b.lines.size() - 1); b.cx = cxFromV(b.lines[b.cy], b.want); clampCursor(b); }
+        else if (y >= L.edY && y < L.outY && x >= L.edX) {
+            for (int i = 0; i < (int)panes.size(); i++) {
+                Pane& P = panes[i]; if (!(x >= P.hx && x < P.hx + P.hw && y >= P.hy && y < P.y + P.h) || !paneBufOk(P.buf)) continue;
+                Buffer& b = bufs[P.buf]; int n = (int)b.lines.size();
+                if (i == activePane) { b.top = std::max(0, std::min(n - 1, b.top + d * 3)); b.cy = std::max(b.top, std::min(b.cy, b.top + AP.h - 1)); b.cy = std::min(b.cy, n - 1); b.cx = cxFromV(b.lines[b.cy], b.want); clampCursor(b); }
+                else P.top = std::max(0, std::min(n - 1, P.top + d * 3));
+                break;
+            }
+        }
         return;
     }
     if (!press) return;
     if (y == 0) {
         if (x < btnW) { doAction(runner.running ? ACT_STOP : (releaseMode ? ACT_RUN_REL : ACT_RUN)); return; }
         for (auto& h : menuHits) if (x >= h.x0 && x < h.x1) { if (menuOpen == h.idx) menuOpen = -1; else { menuOpen = h.idx; menuSel = 0; } return; }
+        for (auto& h : splitBtns) if (x >= h.x0 && x < h.x1) { menuOpen = -1; doAction(h.idx); return; }
         menuOpen = -1; return;
     }
     if (y == 1) {
@@ -1766,12 +2700,31 @@ static void handleMouse() {
         int i = treeTop + (y - (L.edY + 2)); if (y >= L.edY + 2 && i >= 0 && i < (int)tree.size()) { treeSel = i; focus = F_TREE; treeActivate(); }
         return;
     }
-    if (showOut && y > L.outY && y < L.statY) { int i = outFirst + (y - L.outY - 1); if (i >= 0 && i < (int)outLines.size()) { if (!jumpFromLine(outLines[i])) setMsg("Line has no file:line reference", true); } return; }
-    if (y >= L.edY && y < L.outY && x >= L.edX && cur >= 0) {
-        Buffer& b = bufs[cur]; focus = F_EDITOR; pop.on = false;
-        mouseToCursor(b, x, y); insKind = 0;
-        if (mode == INSERT && (ev.bstate & BUTTON1_PRESSED)) { insSel = true; selAy = b.cy; selAx = b.cx; dragging = true; }  // começa a seleção
-        else insSel = false;
+    if (showOut && y == L.outY) {
+        for (auto& h : botHits) if (x >= h.x0 && x < h.x1) {
+                if (h.idx == 2) { showOut = false; if (focus == F_TERM) focus = cur >= 0 ? F_EDITOR : F_TREE; }
+                else if (h.idx == 1) { bottomTab = 1; layout(); if (!term.started && !term.exited) termStart(); focus = F_TERM; }
+                else { bottomTab = 0; if (focus == F_TERM) focus = cur >= 0 ? F_EDITOR : F_TREE; }
+                return;
+            }
+        return;
+    }
+    if (showOut && y > L.outY && y < L.statY) {
+        if (bottomTab == 1) { if (term.exited) { termStart(); } focus = F_TERM; mode = mode == INSERT ? NORMAL : mode; pop.on = false; return; }
+        int i = outFirst + (y - L.outY - 1); if (i >= 0 && i < (int)outLines.size()) { if (!jumpFromLine(outLines[i])) setMsg("Line has no file:line reference", true); } return;
+    }
+    if (y >= L.edY && y < L.outY && x >= L.edX) {
+        for (int i = 0; i < (int)panes.size(); i++) {
+            Pane& P = panes[i]; if (!(x >= P.hx && x < P.hx + P.hw && y >= P.hy && y < P.y + P.h)) continue;
+            bool multi = panes.size() > 1;
+            if (multi && y == P.hy) { if (x >= P.hx + P.hw - 3) { closePane(i); return; } setActivePane(i); focus = cur >= 0 ? F_EDITOR : focus; return; }
+            setActivePane(i); if (cur < 0) return;
+            Buffer& b = bufs[cur]; focus = F_EDITOR; pop.on = false;
+            mouseToCursor(b, x, y); insKind = 0;
+            if (mode == INSERT && (ev.bstate & BUTTON1_PRESSED)) { insSel = true; selAy = b.cy; selAx = b.cx; dragging = true; }  // começa a seleção
+            else insSel = false;
+            return;
+        }
     }
 }
 
@@ -1780,7 +2733,7 @@ static void menuKey(int ch) {
     auto items = menuItems(menuOpen); int n = (int)items.size();
     switch (ch) {
     case 27: case KEY_F(10): menuOpen = -1; break;
-    case KEY_LEFT: menuOpen = (menuOpen + 3) % 4; menuSel = 0; break; case KEY_RIGHT: menuOpen = (menuOpen + 1) % 4; menuSel = 0; break;
+    case KEY_LEFT: menuOpen = (menuOpen + NMENU - 1) % NMENU; menuSel = 0; break; case KEY_RIGHT: menuOpen = (menuOpen + 1) % NMENU; menuSel = 0; break;
     case KEY_UP: menuSel = (menuSel + n - 1) % n; break; case KEY_DOWN: menuSel = (menuSel + 1) % n; break;
     case 10: case 13: case KEY_ENTER: { int a = items[menuSel].act; menuOpen = -1; doAction(a); break; }
     }
@@ -1796,8 +2749,12 @@ static void handleKey(int ch) {
     if (ch != KEY_MOUSE) dragging = false;
     if (ch == KEY_MOUSE) { handleMouse(); return; }
     if (menuOpen >= 0) { menuKey(ch); return; }
+    if (focus == F_TERM && (!showOut || bottomTab != 1)) focus = cur >= 0 ? F_EDITOR : F_TREE;
+    if (focus == F_TERM && !(ch >= KEY_F(1) && ch <= KEY_F(12))) { termKey(ch); return; }  // no terminal, as teclas vão para o shell
     bool inIns = focus == F_EDITOR && cur >= 0 && mode == INSERT;
     switch (ch) {
+    case KEY_F(2): doAction(ACT_NEXT_PANE); return; case KEY_F(3): doAction(ACT_SPLIT_R); return; case KEY_F(4): doAction(ACT_TERM); return;
+    case KEY_F(11): doAction(ACT_HOVER); return; case KEY_F(12): doAction(ACT_DEF); return;
     case KEY_F(10): menuOpen = 0; menuSel = 0; return;
     case KEY_F(1): doAction(ACT_DIAG); return;
     case KEY_F(5): doAction(ACT_RUN); return; case KEY_F(6): doAction(ACT_RUN_REL); return; case KEY_F(7): doAction(ACT_STOP); return;
@@ -1814,6 +2771,63 @@ static void handleKey(int ch) {
     else if (mode == INSERT) insertKey(ch);
     else if (mode == VISUAL || mode == VLINE) visualKey(ch);
     else normalKey(ch);
+}
+
+// ============================================================ sessão (arquivos abertos, cursor, divisões, painéis)
+static string cfgDir() {
+    string base;
+#ifdef _WIN32
+    const wchar_t* a = _wgetenv(L"APPDATA"); if (a && *a) base = wu8(a);
+#else
+    const char* x = getenv("XDG_CONFIG_HOME"); if (x && *x) base = x; else { const char* h = getenv("HOME"); if (h && *h) base = string(h) + "/.config"; }
+#endif
+    if (base.empty()) return ""; string d = base + SEP + "vimple"; std::error_code ec; fs::create_directories(toPath(d), ec); return ec ? string() : d;
+}
+static string sessionFile() {
+    string d = cfgDir(); if (d.empty() || root.empty()) return "";
+    uint64_t h = 1469598103934665603ull; for (unsigned char c : pathKey(root)) { h ^= c; h *= 1099511628211ull; }
+    std::error_code ec; fs::create_directories(toPath(d + SEP + "sessions"), ec); char hx[32]; snprintf(hx, sizeof hx, "%016llx", (unsigned long long)h);
+    return d + SEP + "sessions" + SEP + hx + ".session";
+}
+static void saveLastProject() { string d = cfgDir(); if (d.empty() || root.empty()) return; std::ofstream f(toPath(d + SEP + "last"), std::ios::binary | std::ios::trunc); if (f) f << root << "\n"; }
+static string loadLastProject() { string d = cfgDir(); if (d.empty()) return ""; std::ifstream f(toPath(d + SEP + "last"), std::ios::binary); string l; if (f && std::getline(f, l)) { while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back(); return l; } return ""; }
+static void sessionSave() {
+    string fn = sessionFile(); if (fn.empty()) return;
+    if (paneBufOk(cur) && activePane >= 0 && activePane < (int)panes.size()) { panes[activePane].top = bufs[cur].top; panes[activePane].left = bufs[cur].left; panes[activePane].buf = cur; }
+    std::ofstream f(toPath(fn), std::ios::binary | std::ios::trunc); if (!f) return;
+    f << "vimple-session 1\nroot=" << root << "\nlayout=" << (splitCols ? "cols" : "rows") << "\nactive=" << activePane << "\ntree=" << (showTree ? 1 : 0) << "\nout=" << (showOut ? 1 : 0) << "\ntab=" << bottomTab << "\nrelease=" << (releaseMode ? 1 : 0) << "\n";
+    for (auto& e : expanded) f << "exp=" << e << "\n";
+    for (auto& b : bufs) { std::error_code ec; if (b.path.empty() || !fs::exists(toPath(b.path), ec)) continue; f << "buf=" << b.path << "\t" << b.cy << "\t" << b.cx << "\t" << b.top << "\t" << b.left << "\n"; }
+    for (auto& p : panes) f << "pane=" << p.buf << "\t" << p.top << "\t" << p.left << "\n";
+}
+static vector<string> tabSplit(const string& s) { vector<string> o; size_t a = 0; for (;;) { size_t t = s.find('\t', a); if (t == string::npos) { o.push_back(s.substr(a)); break; } o.push_back(s.substr(a, t - a)); a = t + 1; } return o; }
+static void sessionLoad() {
+    string fn = sessionFile(); if (fn.empty()) return; std::ifstream f(toPath(fn), std::ios::binary); if (!f) return;
+    string l; if (!std::getline(f, l) || l.compare(0, 15, "vimple-session ") != 0) return;
+    struct SB { string path; int cy, cx, top, left; }; vector<SB> sb; vector<std::array<int, 3>> sp; vector<string> exps;
+    bool cols = true, tree = true, out = false, rel = false; int act = 0, tab = 0;
+    while (std::getline(f, l)) {
+        if (!l.empty() && l.back() == '\r') l.pop_back(); size_t e = l.find('='); if (e == string::npos) continue; string k = l.substr(0, e), v = l.substr(e + 1);
+        if (k == "layout") cols = v != "rows"; else if (k == "active") act = atoi(v.c_str()); else if (k == "tree") tree = v == "1"; else if (k == "out") out = v == "1"; else if (k == "tab") tab = atoi(v.c_str()); else if (k == "release") rel = v == "1";
+        else if (k == "exp") exps.push_back(v);
+        else if (k == "buf") { auto t = tabSplit(v); if (t.size() >= 5) sb.push_back({t[0], atoi(t[1].c_str()), atoi(t[2].c_str()), atoi(t[3].c_str()), atoi(t[4].c_str())}); }
+        else if (k == "pane") { auto t = tabSplit(v); if (t.size() >= 3) sp.push_back({atoi(t[0].c_str()), atoi(t[1].c_str()), atoi(t[2].c_str())}); }
+    }
+    for (auto& e : exps) { std::error_code ec; if (fs::is_directory(toPath(e), ec)) setExp(e, true); }
+    refreshTree(); vector<int> map(sb.size(), -1);
+    for (size_t i = 0; i < sb.size(); i++) {
+        if (!openFile(sb[i].path)) { msg.clear(); continue; }
+        map[i] = cur; Buffer& b = bufs[cur]; b.cy = std::max(0, std::min(sb[i].cy, (int)b.lines.size() - 1)); b.cx = std::max(0, sb[i].cx); b.top = std::max(0, sb[i].top); b.left = std::max(0, sb[i].left); clampCursor(b); setWant(b);
+    }
+    msg.clear(); splitCols = cols; releaseMode = rel; showTree = tree; panes.clear();
+    for (auto& q : sp) { Pane p; p.buf = (q[0] >= 0 && q[0] < (int)map.size()) ? map[q[0]] : -1; p.top = std::max(0, q[1]); p.left = std::max(0, q[2]); panes.push_back(p); if (panes.size() >= 4) break; }
+    if (panes.empty()) panes.assign(1, Pane()); activePane = std::max(0, std::min(act, (int)panes.size() - 1));
+    cur = paneBufOk(panes[activePane].buf) ? panes[activePane].buf : -1; if (cur < 0 && !bufs.empty() && panes.size() == 1) cur = 0;
+    if (cur >= 0) { bufs[cur].top = panes[activePane].top; bufs[cur].left = panes[activePane].left; }
+    mode = NORMAL; focus = cur >= 0 ? F_EDITOR : F_TREE; if (!tree && cur < 0) showTree = true;
+    showOut = out; bottomTab = tab == 1 ? 1 : 0; if (showOut && bottomTab == 0 && outLines.empty()) showOut = false;
+    layout(); if (showOut && bottomTab == 1) termStart();
+    if (cur >= 0) { selectPath(bufs[cur].path); focus = F_EDITOR; }
 }
 
 // ============================================================ main
@@ -1883,6 +2897,8 @@ int main(int argc, char** argv) {
         a = cpToU8(a, 0);  // argv vem na codepage ANSI
 #endif
         fs::path pth = fs::weakly_canonical(toPath(a), ec); if (fs::is_directory(pth, ec)) openProject(pth);
+    } else {  // sem argumento: reabre o último projeto (com a sessão dele)
+        string last = loadLastProject(); std::error_code ec; if (!last.empty() && fs::is_directory(toPath(last), ec)) openProject(toPath(last));
     }
     while (root.empty()) {
         string path; std::error_code ec;
@@ -1893,11 +2909,17 @@ int main(int argc, char** argv) {
 #endif
         if (!pickFolder(start, path)) { shutdownCurses(); return 0; } openProject(toPath(path));
     }
+    auto lastSave = std::chrono::steady_clock::now();
     while (!quitting) {
-        runnerPoll(); drawAll(); int ch = readKey(runner.running ? 50 : -1);
+        bgPoll(); runDeferred(); drawAll();
+        bool termVis = term.started && showOut && bottomTab == 1;
+        int to = termVis ? 20 : runner.running ? 50 : (lsp.state == 1 || lsp.inflight) ? 40 : (lsp.state == 2 || lsp.p.alive) ? 120 : -1;
+        int ch = readKey(to);
         if (ch != ERR) handleKey(ch);
         if (mode != INSERT) { insSel = false; insKind = 0; dragging = false; }
+        auto nowT = std::chrono::steady_clock::now(); if (nowT - lastSave > std::chrono::seconds(30)) { lastSave = nowT; sessionSave(); }  // autosave da sessão (protege contra travamentos)
     }
+    sessionSave(); lspStop(); termKill();
 #ifdef _WIN32
     if (runner.running) runnerStop();
 #else
