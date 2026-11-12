@@ -21,7 +21,7 @@ The idea: inside a file, editing is modal (`hjkl`, `i`, `v`, `dd`, `yy`, `p`, `u
 
 ## Building
 
-vimple is built with [rsfmake](#):
+vimple is built with [rsfmake](https://github.com/rsfis/rsfmake):
 
 ```bash
 rsfmake run -r
