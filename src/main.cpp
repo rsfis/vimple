@@ -2,6 +2,8 @@
 // Toda a interação "de programa" é por UI (menus, diálogos, botões, mouse).
 // Dentro do arquivo a edição é modal: hjkl, i, v, dd, yy, p, u ...
 // Recursos: LSP (clangd) · divisão de tela (F3 / botões / menu View) · terminal embutido (F4) · sessão lembrada por projeto.
+// Índice de símbolos leve entre arquivos .c/.cpp/.h (e variações) + includes do rsfmake.toml [dependencies] / CMakeLists.txt: autocomplete, sugestões e realce.
+// Project > Clean build / Configure clean build (salvo em .vimple.conf da pasta aberta).
 // Compilar (Linux):   g++ -std=c++17 -O2 main.cpp -o vimple -lncursesw
 // Windows: PDCurses(Mod) com wide + UTF-8; o terminal embutido usa ConPTY (Windows 10 1809+), o LSP usa pipes.
 // ---- curses: ncurses (Linux/macOS) ou PDCurses/PDCursesMod (Windows)
@@ -56,6 +58,7 @@ typedef int pid_t;
 #include <set>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -229,10 +232,10 @@ static string homeDir() {
 }
 
 // ============================================================ tema gruvbox-dark
-enum { K_BG0, K_BG1, K_BG2, K_BG3, K_FG, K_RED, K_GRN, K_YEL, K_BLU, K_PUR, K_AQU, K_ORG, K_GRY, K_LGR, K_BTN, K_DRD, K_LOR, K_N };
+enum { K_BG0, K_BG1, K_BG2, K_BG3, K_FG, K_RED, K_GRN, K_YEL, K_BLU, K_PUR, K_AQU, K_ORG, K_GRY, K_LGR, K_BTN, K_DRD, K_LOR, K_VAR, K_N };
 static const int RGB[K_N][3] = {{40, 40, 40}, {60, 56, 54}, {80, 73, 69}, {102, 92, 84}, {235, 219, 178}, {251, 73, 52}, {184, 187, 38}, {250, 189, 47},
-                                {131, 165, 152}, {211, 134, 155}, {142, 192, 124}, {254, 128, 25}, {146, 131, 116}, {168, 153, 134}, {69, 133, 136}, {204, 36, 29}, {255, 170, 90}};
-static const int FB256[K_N] = {235, 237, 239, 241, 223, 167, 142, 214, 109, 175, 108, 208, 245, 246, 66, 124, 215};
+                                {131, 165, 152}, {211, 134, 155}, {142, 192, 124}, {254, 128, 25}, {146, 131, 116}, {168, 153, 134}, {69, 133, 136}, {204, 36, 29}, {255, 170, 90}, {129, 175, 224}};
+static const int FB256[K_N] = {235, 237, 239, 241, 223, 167, 142, 214, 109, 175, 108, 208, 245, 246, 66, 124, 215, 110};
 static int C[K_N];
 // Pares de cor: os ids lógicos (P_*) são mapeados para pares compactos (PM). Algumas builds do PDCurses aceitam poucos pares
 // (ou codificam o número do par em poucos bits); pares iguais são reutilizados e, se faltar espaço, o que for cosmético cai num par parecido.
@@ -242,7 +245,7 @@ static int diagPairFail = 0, diagPairLim = 0, diagPairUsed = 0;
 enum { P_TEXT = 1, P_BAR, P_SEL, P_LINENO, P_LINENO_CUR, P_BTN, P_BTN_STOP, P_MENU, P_MENU_ACT, P_TAB, P_TAB_ACT, P_MODE_N, P_MODE_I, P_MODE_V, P_MODE_T,
        P_POP, P_POPSEL, P_DIR, P_ERR, P_WARN, P_NOTE, P_OK, P_GRAY, P_SIDE_SEL, P_SIDE_SELF, P_DLG, P_DLGB, P_DLGT, P_INP, P_INPF, P_BTNX,
        P_HINT, P_TITLE, P_SEP, P_HINTBAR, P_TREEHDR, P_SYN = 40, P_TERM = 70 };
-enum { S_TEXT, S_KW, S_TYPE, S_STR, S_NUM, S_COM, S_PRE, S_FN, S_OP };
+enum { S_TEXT, S_KW, S_TYPE, S_STR, S_NUM, S_COM, S_PRE, S_FN, S_OP, S_UTYPE, S_VAR, S_CONST, S_N };  // S_UTYPE/S_VAR/S_CONST: vêm do índice de símbolos
 
 // Console de 16 cores (PDCurses clássico / conhost): usa os 16 slots da paleta (redefinidos se possível).
 static bool pal16 = false, palSaved = false; static short savedPal[16][3];
@@ -267,7 +270,7 @@ static void initTheme() {
             if (can && i < 16) {
                 color_content((short)i, &savedPal[i][0], &savedPal[i][1], &savedPal[i][2]);
                 init_color((short)i, (short)(RGB[i][0] * 1000 / 255), (short)(RGB[i][1] * 1000 / 255), (short)(RGB[i][2] * 1000 / 255)); C[i] = i;
-            } else if (can) C[i] = C[K_ORG];
+            } else if (can) C[i] = (i == K_VAR) ? C[K_BTN] : C[K_ORG];
             else C[i] = nearest16(i);
         }
         palSaved = can;
@@ -285,9 +288,9 @@ static void initTheme() {
         if (nextId < lim && init_pair((short)nextId, (short)C[f], (short)C[b]) == OK) { seen[k] = nextId; PM[id] = nextId++; }
         else { PM[id] = 0; diagPairFail++; }
     };
-    int syn[9] = {K_FG, K_RED, K_YEL, K_GRN, K_PUR, K_GRY, K_AQU, K_BLU, K_LOR};
+    int syn[S_N] = {K_FG, K_RED, K_YEL, K_GRN, K_PUR, K_GRY, K_AQU, K_BLU, K_LOR, K_ORG, K_VAR, K_PUR};
     P(P_TEXT, K_FG, K_BG0);
-    for (int i = 0; i < 9; i++) P(P_SYN + i, syn[i], K_BG0);  // realce de sintaxe tem prioridade
+    for (int i = 0; i < S_N; i++) P(P_SYN + i, syn[i], K_BG0);  // realce de sintaxe tem prioridade
     P(P_BAR, K_FG, K_BG1); P(P_SEL, K_FG, K_BG3); P(P_LINENO, K_GRY, K_BG0); P(P_LINENO_CUR, K_YEL, K_BG1);
     P(P_BTN, K_FG, K_BTN); P(P_BTN_STOP, K_FG, K_DRD); P(P_MENU, K_FG, K_BG1); P(P_MENU_ACT, K_BG0, K_LGR);
     P(P_TAB, K_LGR, K_BG2); P(P_TAB_ACT, K_YEL, K_BG0);
@@ -297,9 +300,9 @@ static void initTheme() {
     P(P_DLG, K_FG, K_BG1); P(P_DLGB, K_LGR, K_BG1); P(P_DLGT, K_YEL, K_BG1); P(P_INP, K_FG, K_BG0); P(P_INPF, K_FG, K_BG2); P(P_BTNX, K_FG, K_BG2);
     P(P_HINT, K_GRY, K_BG0); P(P_TITLE, K_ORG, K_BG0); P(P_SEP, K_BG3, K_BG0); P(P_HINTBAR, K_GRY, K_BG1); P(P_TREEHDR, K_BLU, K_BG1);
     { int tc[8] = {K_GRY, K_RED, K_GRN, K_YEL, K_BLU, K_PUR, K_AQU, K_FG}; for (int i = 0; i < 8; i++) P(P_TERM + i, tc[i], K_BG0); }  // terminal embutido
-    for (int i = 0; i < 9; i++) P(P_SYN + 16 + i, syn[i], K_BG1);  // linha atual (por último: é só estético)
+    for (int i = 0; i < S_N; i++) P(P_SYN + 16 + i, syn[i], K_BG1);  // linha atual (por último: é só estético)
     for (int id = 1; id < P_SYN + 16; id++) if (!PM[id]) PM[id] = PM[P_TEXT];
-    for (int id = P_SYN + 16; id < P_SYN + 25; id++) if (!PM[id]) PM[id] = PM[id - 16];
+    for (int id = P_SYN + 16; id < P_SYN + 16 + S_N; id++) if (!PM[id]) PM[id] = PM[id - 16];
     for (int i = 0; i < 8; i++) if (!PM[P_TERM + i]) PM[P_TERM + i] = PM[P_TEXT];
     diagPairUsed = nextId - 1;
     bkgd(CP(P_TEXT));
@@ -337,6 +340,7 @@ struct Buffer {
     int cy = 0, cx = 0, top = 0, left = 0, want = 0;
     vector<Snap> undo, redo;
     vector<Diag> diags; int lspVer = 0; bool lspOpen = false, lspDirty = false; uint64_t lspHash = 0; long long lspEdit = 0;  // estado do LSP
+    uint64_t xHash = 0, xPend = 0; long long xEdit = 0; int xid = -1;  // estado do índice de símbolos
     string name() const { return pstr(toPath(path).filename()); }
 };
 
@@ -347,6 +351,7 @@ struct Config {
     string run = "rsfmake run", release = "rsfmake run -r"; bool terminal = false;
     string shell;  // vazio = $SHELL (Linux) / %COMSPEC% (Windows)
     string lsp = "clangd --background-index --header-insertion=never"; bool lspOn = true;
+    string clean; bool cleanRun = false;  // clean build: vazio = comando padrão do projeto · cleanRun = rodar o projeto logo depois
 };
 struct Runner { pid_t pid = -1; int fd = -1; bool running = false, eof = false, killed = false; string part; };
 struct TreeNode { string path, name; bool dir; int depth; };
@@ -689,6 +694,25 @@ static bool searchDir(Buffer& b, const string& pat, bool fwd) {
 
 // ============================================================ realce de sintaxe
 static std::unordered_set<string> HL_KW, HL_TY;
+// ---- índice de símbolos (declarações usadas pelo realce; a implementação vem logo depois do realce)
+enum { SK_NONE = 0, SK_TYPE, SK_FUNC, SK_VAR, SK_CONST, SK_NS, SK_N };  // tipos, funções, variáveis, constantes/macros/enumeradores, namespaces
+struct XAgg { uint16_t c[SK_N] = {0, 0, 0, 0, 0, 0}; uint8_t best = 0; };  // quantas vezes o nome foi declarado, por tipo (best = o que vale para a cor)
+static std::unordered_map<string, XAgg> xAgg;                              // nome -> tipo (consulta O(1) no desenho)
+static std::set<string> xNames;                                            // nomes em ordem (autocomplete por prefixo em O(log n))
+static const std::unordered_map<string, uint8_t>* gLocals = nullptr;       // variáveis locais/parâmetros do arquivo que está sendo desenhado
+static bool gSymOn = false;                                                // o painel atual é C/C++ (usa o índice)
+static uint8_t symClass(const string& w, bool call) {  // classe de realce (S_*) de um identificador conhecido; 0 = desconhecido
+    uint8_t k = 0;
+    if (gLocals) { auto it = gLocals->find(w); if (it != gLocals->end()) k = it->second; }
+    if (!k) { auto it = xAgg.find(w); if (it != xAgg.end()) k = it->second.best; }
+    switch (k) {
+    case SK_TYPE: case SK_NS: return S_UTYPE;
+    case SK_CONST: return call ? S_FN : S_CONST;
+    case SK_FUNC: return S_FN;
+    case SK_VAR: return call ? S_FN : S_VAR;
+    }
+    return 0;
+}
 static bool isIdent(char c) { return isalnum((unsigned char)c) || c == '_' || (unsigned char)c >= 128; }
 static void scanLine(const string& s, bool& inb, vector<uint8_t>* out) {
     size_t n = s.size(); if (out) out->assign(n, S_TEXT);
@@ -716,9 +740,14 @@ static void scanLine(const string& s, bool& inb, vector<uint8_t>* out) {
         }
         if (isalpha((unsigned char)c) || c == '_') {
             size_t j = i; while (j < n && isIdent(s[j])) j++;
+            if (!out) { i = j; continue; }  // só rastreando comentários de bloco: não classifica
             string w = s.substr(i, j - i); uint8_t k = S_TEXT;
             if (HL_KW.count(w)) k = S_KW; else if (HL_TY.count(w)) k = S_TYPE;
-            else { size_t q = j; while (q < n && s[q] == ' ') q++; if (q < n && s[q] == '(') k = S_FN; }
+            else {
+                size_t q = j; while (q < n && s[q] == ' ') q++; bool call = q < n && s[q] == '(';
+                uint8_t sc = gSymOn ? symClass(w, call) : 0;  // tipos/variáveis/constantes/funções conhecidos (projeto, includes, locais)
+                if (sc) k = (uint8_t)sc; else if (call) k = S_FN;
+            }
             setr(i, j, k); i = j; continue;
         }
         {   // operadores de comparação e lógicos: == != <= >= < > && ||
@@ -733,6 +762,818 @@ static void scanLine(const string& s, bool& inb, vector<uint8_t>* out) {
         }
         i++;
     }
+}
+
+// ============================================================ índice de símbolos entre arquivos (leve e incremental)
+// Um analisador de declarações bem simples (sem pré-processador, sem semântica): acha tipos, funções, variáveis, constantes,
+// macros, enumeradores e namespaces visíveis entre arquivos, mais as variáveis locais/parâmetros de cada arquivo.
+// Nunca roda no caminho quente do teclado: a indexação acontece em fatias de ~3 ms dentro de bgPoll().
+static bool isSrcPath(const string& path) {  // .c .cpp .cc .cxx .h .hpp .hh .hxx .ipp .inl .tpp .cu .cuh ... (as variações)
+    string e = lowerA(pstr(toPath(path).extension()));
+    static const std::unordered_set<string> X = {".c", ".cc", ".cpp", ".cxx", ".c++", ".cp", ".h", ".hh", ".hpp", ".hxx", ".h++", ".ipp", ".inl", ".tpp", ".tcc", ".cu", ".cuh", ".mm", ".ixx", ".cppm", ".ino"};
+    return X.count(e) > 0;
+}
+struct XSym { string name, owner, type; uint8_t kind = 0; };  // owner = classe/namespace/enum que contém · type = tipo (variáveis) ou bases (classes)
+struct XInc { string name; bool quoted = false; };
+struct XFile {
+    string path; long long mtime = 0; uint64_t size = 0; bool live = false, dead = false, dep = false; int depth = 0;
+    vector<XSym> syms;                               // declarações visíveis entre arquivos
+    std::unordered_map<string, uint8_t> locals;      // variáveis locais/parâmetros/parâmetros de template do arquivo (SK_VAR ou SK_TYPE)
+    std::unordered_map<string, string> ltype;        // variável local -> nome do tipo
+    vector<XInc> incs;                               // #include encontrados
+};
+static bool xQual(const string& w) {
+    static const std::unordered_set<string> Q = {"const", "volatile", "static", "extern", "inline", "constexpr", "mutable", "register", "thread_local", "virtual", "explicit", "friend", "typename",
+                                                 "consteval", "constinit", "__extension__", "__inline", "__inline__", "__forceinline", "restrict", "__restrict"};
+    return Q.count(w) > 0;
+}
+static bool xNoDecl(const string& w) {  // palavras que começam comandos (nunca declarações)
+    static const std::unordered_set<string> S = {"return", "goto", "throw", "delete", "new", "case", "default", "break", "continue", "else", "do", "if", "while", "for", "switch", "try", "catch", "co_return",
+                                                 "co_yield", "co_await", "sizeof", "typedef", "namespace", "static_assert", "public", "private", "protected", "operator", "this", "true", "false", "nullptr",
+                                                 "alignof", "asm", "using", "export", "template", "requires", "and", "or", "not"};
+    return S.count(w) > 0;
+}
+struct XTok { uint32_t s, n; char k; };  // k: 'i' identificador · 'n' número · 'l' literal · 'Q' "::" · 'A' "->" · senão o próprio caractere
+struct XParser {
+    const string& t; XFile& f;
+    struct Sc { char k = 'N'; string owner; bool saved = false, td = false; vector<XTok> st; int par = 0, brk = 0; vector<int> ctrl; };  // N namespace/global · C classe · E enum · F corpo/bloco
+    struct Spec { char k = 'F'; string owner; bool td = false; };
+    struct Dec { string name, type; bool isConst = false; vector<string> binds; };
+    vector<Sc> sc; vector<XTok> st; int par = 0, brk = 0; vector<int> ctrl; bool closedBody = false, closedTd = false;
+    std::unordered_set<string> seen;
+    XParser(const string& text, XFile& file) : t(text), f(file) { sc.push_back(Sc()); }
+
+    string tx(const XTok& k) const { return t.substr(k.s, k.n); }
+    bool is(const XTok& k, const char* w) const { return k.k == 'i' && t.compare(k.s, k.n, w) == 0; }
+    static bool kwTy(const string& w) { return HL_KW.count(w) > 0 || HL_TY.count(w) > 0; }
+    bool isAttrWord(const XTok& k) const { return is(k, "decltype") || is(k, "alignas") || is(k, "__attribute__") || is(k, "__declspec") || is(k, "typeof") || is(k, "__typeof__") || is(k, "noexcept") || is(k, "requires") || is(k, "_Alignas"); }
+    void addSym(const string& name, uint8_t kind, const string& owner, const string& type) {
+        if (name.empty() || f.syms.size() >= 8000) return;
+        string key = name; key += '\0'; key += (char)('0' + kind); key += owner;
+        if (!seen.insert(key).second) return;
+        XSym s; s.name = name; s.owner = owner; s.type = type; s.kind = kind; f.syms.push_back(std::move(s));
+    }
+    void addLocal(const string& name, uint8_t kind, const string& type) {
+        if (name.empty() || f.locals.size() >= 3000) return;
+        f.locals[name] = kind; if (!type.empty()) f.ltype[name] = type;
+    }
+    // ---- léxico
+    static bool idStart(char c) { return isalpha((unsigned char)c) || c == '_' || (unsigned char)c >= 128 || c == '$'; }
+    static bool idCh(char c) { return isalnum((unsigned char)c) || c == '_' || (unsigned char)c >= 128 || c == '$'; }
+    size_t skipLit(size_t i) const {
+        size_t n = t.size(); char q = t[i]; size_t j = i + 1;
+        while (j < n && t[j] != q) { if (t[j] == '\\') j++; else if (t[j] == '\n') break; j++; }
+        return std::min(n, j + 1);
+    }
+    size_t skipRaw(size_t j) const {  // j em '"' de R"delim( ... )delim"
+        size_t n = t.size(), p = j + 1; while (p < n && t[p] != '(' && p - j <= 17) p++;
+        string d = ")" + t.substr(j + 1, p - (j + 1)) + "\""; size_t e = t.find(d, p); return e == string::npos ? n : e + d.size();
+    }
+    size_t directive(size_t i) {
+        size_t n = t.size(), e = i;
+        while (e < n && !(t[e] == '\n' && !(e > i && (t[e - 1] == '\\' || (t[e - 1] == '\r' && e > i + 1 && t[e - 2] == '\\'))))) e++;
+        size_t p = i + 1; while (p < e && (t[p] == ' ' || t[p] == '\t')) p++;
+        size_t q = p; while (q < e && isalpha((unsigned char)t[q])) q++;
+        string w = t.substr(p, q - p);
+        if (w == "include" || w == "include_next" || w == "import") {
+            while (q < e && (t[q] == ' ' || t[q] == '\t')) q++;
+            if (q < e && (t[q] == '<' || t[q] == '"')) {
+                char close = t[q] == '<' ? '>' : '"'; size_t z = t.find(close, q + 1);
+                if (z != string::npos && z < e && f.incs.size() < 400) { XInc inc; inc.name = t.substr(q + 1, z - q - 1); inc.quoted = close == '"'; if (!inc.name.empty()) f.incs.push_back(inc); }
+            }
+        } else if (w == "define") {
+            while (q < e && (t[q] == ' ' || t[q] == '\t')) q++;
+            size_t z = q; while (z < e && idCh(t[z])) z++;
+            if (z > q && idStart(t[q])) {
+                string name = t.substr(q, z - q); size_t body = z;
+                if (body < e && t[body] == '(') { size_t cl = t.find(')', body); body = (cl == string::npos || cl > e) ? e : cl + 1; }
+                bool empty = true; for (size_t k = body; k < e; k++) if (!isspace((unsigned char)t[k]) && t[k] != '\\') { empty = false; break; }
+                auto ends = [&](const char* sfx) { size_t L = strlen(sfx); return name.size() > L && name.compare(name.size() - L, L, sfx) == 0; };
+                bool guard = empty && (ends("_H") || ends("_HPP") || ends("_H_") || ends("_HPP_") || ends("_HH") || ends("_INCLUDED") || ends("_GUARD") || ends("_HXX") || name.compare(0, 2, "__") == 0);
+                if (!guard) addSym(name, SK_CONST, "", "");
+            }
+        }
+        return e;
+    }
+    void run() {
+        size_t n = t.size(), i = 0; bool bol = true;
+        while (i < n) {
+            if (sc.size() > 2000) break;
+            char c = t[i];
+            if (c == '\n') { bol = true; i++; continue; }
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') { i++; continue; }
+            if (c == '/' && i + 1 < n && t[i + 1] == '/') { while (i < n && t[i] != '\n') i++; continue; }
+            if (c == '/' && i + 1 < n && t[i + 1] == '*') { size_t e = t.find("*/", i + 2); i = e == string::npos ? n : e + 2; continue; }
+            if (c == '#' && bol) { i = directive(i); continue; }
+            bol = false;
+            if (c == '"' || c == '\'') { size_t e = skipLit(i); feed(XTok{(uint32_t)i, (uint32_t)(e - i), 'l'}); i = e; continue; }
+            if (isdigit((unsigned char)c) || (c == '.' && i + 1 < n && isdigit((unsigned char)t[i + 1]))) {
+                size_t j = i + 1;
+                while (j < n) {
+                    char d = t[j];
+                    if (isalnum((unsigned char)d) || d == '.' || d == '_' || d == '\'') j++;
+                    else if ((d == '+' || d == '-') && (t[j - 1] == 'e' || t[j - 1] == 'E' || t[j - 1] == 'p' || t[j - 1] == 'P')) j++;
+                    else break;
+                }
+                feed(XTok{(uint32_t)i, (uint32_t)(j - i), 'n'}); i = j; continue;
+            }
+            if (idStart(c)) {
+                size_t j = i + 1; while (j < n && idCh(t[j])) j++;
+                if (j < n && (t[j] == '"' || t[j] == '\'')) {  // prefixos de literais: L"" u8"" R"( )"
+                    size_t len = j - i;
+                    bool raw = t[j] == '"' && t[j - 1] == 'R' && (len == 1 || (len == 2 && strchr("LuU", t[i])) || (len == 3 && t.compare(i, 2, "u8") == 0));
+                    bool pref = (len == 1 && strchr("LuU", t[i])) || (len == 2 && t.compare(i, 2, "u8") == 0);
+                    if (raw) { size_t e = skipRaw(j); feed(XTok{(uint32_t)j, (uint32_t)(e - j), 'l'}); i = e; continue; }
+                    if (pref) { i = j; continue; }
+                }
+                feed(XTok{(uint32_t)i, (uint32_t)(j - i), 'i'}); i = j; continue;
+            }
+            if (c == ':' && i + 1 < n && t[i + 1] == ':') { feed(XTok{(uint32_t)i, 2, 'Q'}); i += 2; continue; }
+            if (c == '-' && i + 1 < n && t[i + 1] == '>') { feed(XTok{(uint32_t)i, 2, 'A'}); i += 2; continue; }
+            feed(XTok{(uint32_t)i, 1, c}); i++;
+        }
+    }
+    // ---- máquina de estados por escopo
+    void push(const XTok& k) { if (st.size() < 600) st.push_back(k); }
+    void feed(const XTok& k) {
+        char ch = k.k; Sc& top = sc.back();
+        if (ch == '(') {
+            bool ck = false;
+            if (!st.empty() && st.back().k == 'i') {
+                const XTok& b = st.back();
+                if (is(b, "for") || is(b, "if") || is(b, "while") || is(b, "switch") || is(b, "catch")) ck = true;
+                else if ((is(b, "constexpr") || is(b, "consteval")) && st.size() >= 2 && is(st[st.size() - 2], "if")) ck = true;
+            }
+            par++;
+            if (ck) { ctrl.push_back(par); st.clear(); } else push(k);
+            return;
+        }
+        if (ch == ')') {
+            if (!ctrl.empty() && par == ctrl.back()) { analyze(st, ')'); st.clear(); ctrl.pop_back(); par--; return; }
+            if (par > 0) par--;
+            push(k); return;
+        }
+        if (ch == '[') { brk++; push(k); return; }
+        if (ch == ']') { if (brk > 0) brk--; push(k); return; }
+        if (ch == ';') {
+            if (par > 0) { if (!ctrl.empty() && par == ctrl.back()) { analyze(st, ';'); st.clear(); } return; }
+            if (closedBody) { afterBody(); closedBody = closedTd = false; st.clear(); return; }
+            analyze(st, ';'); st.clear(); return;
+        }
+        if (ch == '{') { open(); return; }
+        if (ch == '}') { close(); return; }
+        if (ch == ',' && par == 0 && brk == 0 && top.k == 'E') { enumPiece(); st.clear(); return; }
+        if (ch == ':' && par == 0 && !st.empty() && st[0].k == 'i') {
+            if (st.size() == 1 && (is(st[0], "public") || is(st[0], "private") || is(st[0], "protected") || is(st[0], "default"))) { st.clear(); return; }
+            if (is(st[0], "case")) { st.clear(); return; }
+        }
+        push(k);
+    }
+    void open() {
+        Sc& top = sc.back(); closedBody = false;
+        if (par > 0 || brk > 0 || top.k == 'E') {  // lambda / inicializador entre parênteses: guarda a expressão externa e continua dentro
+            Sc ns; ns.k = 'F'; ns.owner = top.owner; ns.saved = true; ns.st = std::move(st); ns.par = par; ns.brk = brk; ns.ctrl = std::move(ctrl);
+            lambdaParams(ns.st); sc.push_back(std::move(ns)); st.clear(); par = brk = 0; ctrl.clear(); return;
+        }
+        Spec sp = analyze(st, '{');
+        Sc ns; ns.k = sp.k; ns.owner = sp.owner; ns.td = sp.td; sc.push_back(std::move(ns));
+        st.clear(); par = brk = 0; ctrl.clear();
+    }
+    void close() {
+        if (sc.size() <= 1) { st.clear(); par = brk = 0; ctrl.clear(); return; }
+        if (sc.back().k == 'E' && !sc.back().saved) enumPiece();
+        Sc s = std::move(sc.back()); sc.pop_back();
+        if (s.saved) { st = std::move(s.st); par = s.par; brk = s.brk; ctrl = std::move(s.ctrl); return; }
+        st.clear(); par = brk = 0; ctrl.clear();
+        if (s.k == 'C' || s.k == 'E') { closedBody = true; closedTd = s.td; }
+    }
+    void enumPiece() {
+        size_t a = skipAttr(st, 0);
+        if (a < st.size() && st[a].k == 'i') { string w = tx(st[a]); if (!kwTy(w)) addSym(w, SK_CONST, sc.back().owner, sc.back().owner); }
+    }
+    void afterBody() {  // "} nome1, *nome2;"  ou  "typedef struct {...} Nome;"
+        Sc& top = sc.back(); bool local = top.k == 'F';
+        for (size_t k = 0; k < st.size(); k++) {
+            const XTok& a = st[k]; if (a.k != 'i') continue; string w = tx(a);
+            if (kwTy(w) || xQual(w)) continue; if (k > 0 && st[k - 1].k == 'Q') continue;
+            if (k + 1 < st.size() && !(st[k + 1].k == ',' || st[k + 1].k == '[' || st[k + 1].k == '=')) continue;
+            if (closedTd) { if (local) addLocal(w, SK_TYPE, ""); else addSym(w, SK_TYPE, top.owner, ""); }
+            else { if (local) addLocal(w, SK_VAR, ""); else addSym(w, SK_VAR, top.owner, ""); }
+        }
+    }
+    // ---- auxiliares de análise
+    size_t skipAttr(const vector<XTok>& s, size_t a) const {  // [[...]]
+        while (a + 1 < s.size() && s[a].k == '[' && s[a + 1].k == '[') {
+            int d = 0; size_t e = a; for (; e < s.size(); e++) { if (s[e].k == '[') d++; else if (s[e].k == ']') { d--; if (d == 0) break; } }
+            a = e + 1;
+        }
+        return a;
+    }
+    size_t matchParen(const vector<XTok>& s, size_t p) const {  // índice do ')' que fecha s[p] == '('
+        int d = 0; for (size_t k = p; k < s.size(); k++) { if (s[k].k == '(') d++; else if (s[k].k == ')') { d--; if (d == 0) return k; } }
+        return s.size();
+    }
+    size_t matchAngle(const vector<XTok>& s, size_t p) const {  // índice do '>' que fecha s[p] == '<' (ou size)
+        int d = 0; for (size_t k = p; k < s.size(); k++) { if (s[k].k == '<') d++; else if (s[k].k == '>') { d--; if (d == 0) return k; } else if (s[k].k == ';') break; }
+        return s.size();
+    }
+    // Um declarador "tipo nome [= ...]" em s[a,b). first = primeiro da lista (exige tipo antes do nome).
+    bool oneDecl(const vector<XTok>& s, size_t a, size_t b, bool first, bool allowCall, const string& inheritType, Dec& out) {
+        a = skipAttr(s, a); if (a >= b) return false;
+        int dp = 0, ang = 0; size_t cut = b; char cutc = 0; bool fnptr = false; size_t fpName = 0;
+        for (size_t k = a; k < b; k++) {
+            char c = s[k].k;
+            if (dp > 0) { if (c == '(') dp++; else if (c == ')') dp--; continue; }
+            if (ang > 0) { if (c == '<') ang++; else if (c == '>') ang--; else if (c == ';') return false; continue; }
+            if (c == '=' || c == '{' || c == '[' || c == ':') { cut = k; cutc = c; break; }
+            if (c == '(') {
+                if (k + 1 < b && (s[k + 1].k == '*' || s[k + 1].k == '&')) {  // ponteiro de função: tipo (*nome)(...)
+                    size_t m = k + 1; while (m < b && (s[m].k == '*' || s[m].k == '&' || is(s[m], "const"))) m++;
+                    if (m + 1 < b && s[m].k == 'i' && s[m + 1].k == ')') { fnptr = true; fpName = m; cut = k; cutc = '('; break; }
+                }
+                bool afterId = k > a && s[k - 1].k == 'i';
+                if (afterId && isAttrWord(s[k - 1])) { dp = 1; continue; }
+                if (afterId && allowCall) { cut = k; cutc = '('; break; }
+                if (afterId) return false;  // declaração de função
+                dp = 1; continue;
+            }
+            if (c == '<' && k > a && s[k - 1].k == 'i') ang = 1;
+        }
+        if (ang > 0 || dp > 0) return false;
+        size_t ne = cut;
+        if (cutc == '[' && ne > a && ne - 1 >= a && (is(s[ne - 1], "auto") || s[ne - 1].k == '&' || s[ne - 1].k == '*') && first) {  // auto [a, b] = ...
+            size_t e = ne + 1; for (; e < b && s[e].k != ']'; e++) if (s[e].k == 'i') out.binds.push_back(tx(s[e]));
+            return !out.binds.empty();
+        }
+        size_t nameIdx;
+        if (fnptr) nameIdx = fpName; else { if (ne <= a) return false; nameIdx = ne - 1; if (s[nameIdx].k != 'i') return false; }
+        string name = tx(s[nameIdx]);
+        if (kwTy(name) || xQual(name) || xNoDecl(name)) return false;
+        if (nameIdx > a && s[nameIdx - 1].k == 'Q') return false;
+        size_t pe = fnptr ? cut : nameIdx; string typeName = inheritType; bool constexprSeen = false, constSeen = false;
+        if (first) {
+            bool typeTok = false, firstTok = true; typeName.clear();
+            for (size_t k = a; k < pe;) {
+                const XTok& x = s[k];
+                if (x.k == 'i') {
+                    string w = tx(x);
+                    if (xQual(w)) { if (w == "constexpr" || w == "constinit") constexprSeen = true; if (w == "const") constSeen = true; k++; continue; }
+                    if (firstTok && xNoDecl(w)) return false;
+                    firstTok = false; typeTok = true; if (w != "struct" && w != "class" && w != "union" && w != "enum") typeName = w;
+                    if (k + 1 < pe && s[k + 1].k == '(') { if (!isAttrWord(x)) return false; size_t e = matchParen(s, k + 1); k = e + 1; continue; }
+                    k++; continue;
+                }
+                if (x.k == 'Q' || x.k == '*' || x.k == '&') { k++; continue; }
+                if (x.k == '<') { size_t e = matchAngle(s, k); if (e >= pe) return false; k = e + 1; continue; }
+                return false;
+            }
+            if (!typeTok) return false;
+        } else {
+            for (size_t k = a; k < pe; k++) if (!(s[k].k == '*' || s[k].k == '&' || is(s[k], "const"))) return false;
+        }
+        out.name = name; out.type = typeName; out.isConst = constexprSeen || (constSeen && cutc == '=');
+        return true;
+    }
+    // Lista de declaradores separados por vírgula em s[a,b). emit(Dec) para cada um que for válido.
+    template <class F> void declList(const vector<XTok>& s, size_t a, size_t b, bool allowCall, F emit, bool indep = false) {
+        size_t seg = a; int dp = 0, ang = 0; bool first = true; string ty;
+        auto doSeg = [&](size_t e) -> bool {
+            Dec d; bool ok = oneDecl(s, seg, e, first || indep, allowCall, ty, d);
+            if (ok) { if (first) ty = d.type; emit(d); }
+            return ok;
+        };
+        for (size_t k = a; k < b; k++) {
+            char c = s[k].k;
+            if (c == '(' || c == '[' || c == '{') dp++; else if (c == ')' || c == ']' || c == '}') { if (dp > 0) dp--; }
+            else if (c == '<' && k > a && s[k - 1].k == 'i') ang++; else if (c == '>' && ang > 0) ang--;
+            else if (c == ',' && dp == 0 && ang == 0) { if (!doSeg(k) && first && !indep) return; first = false; seg = k + 1; }
+        }
+        doSeg(b);
+    }
+    void params(const vector<XTok>& s, size_t a, size_t b) {  // parâmetros de função/lambda -> variáveis locais do arquivo
+        if (b > s.size()) b = s.size();
+        declList(s, a, b, false, [&](const Dec& d) { if (!d.name.empty()) addLocal(d.name, SK_VAR, d.type); for (auto& n : d.binds) addLocal(n, SK_VAR, ""); }, true);
+    }
+    void lambdaParams(const vector<XTok>& s) {
+        if (s.size() < 3) return; size_t r = s.size();
+        for (size_t k = s.size(); k-- > 0;) { if (s[k].k == ')') { r = k; break; } if (s[k].k == '(') break; }
+        if (r == s.size()) return;
+        int d = 0; size_t l = r + 1;
+        for (size_t k = r + 1; k-- > 0;) { if (s[k].k == ')') d++; else if (s[k].k == '(') { d--; if (d == 0) { l = k; break; } } }
+        if (l > r || l == 0 || s[l - 1].k != ']') return;
+        params(s, l + 1, r);
+    }
+    void tparams(const vector<XTok>& s, size_t a, size_t b) {
+        size_t seg = a; int ang = 0, dp = 0;
+        auto one = [&](size_t e) {
+            if (seg >= e) return;
+            if (is(s[seg], "typename") || is(s[seg], "class")) {
+                for (size_t k = seg + 1; k < e; k++) { if (s[k].k == '=') break; if (s[k].k == 'i') { addLocal(tx(s[k]), SK_TYPE, ""); break; } }
+            } else if (is(s[seg], "template")) {
+                size_t last = e; for (size_t k = seg; k < e; k++) { if (s[k].k == '=') break; if (s[k].k == 'i') last = k; }
+                if (last < e) addLocal(tx(s[last]), SK_TYPE, "");
+            } else { Dec d; if (oneDecl(s, seg, e, true, false, "", d)) addLocal(d.name, SK_VAR, d.type); }
+        };
+        for (size_t k = a; k < b; k++) {
+            char c = s[k].k;
+            if (c == '<') ang++; else if (c == '>') { if (ang > 0) ang--; } else if (c == '(' || c == '[') dp++; else if (c == ')' || c == ']') { if (dp > 0) dp--; }
+            else if (c == ',' && ang == 0 && dp == 0) { one(k); seg = k + 1; }
+        }
+        one(b);
+    }
+    size_t tplSkip(const vector<XTok>& s, size_t a) {
+        while (a < s.size() && is(s[a], "template")) {
+            size_t b = a + 1; if (b >= s.size() || s[b].k != '<') { a = b; break; }
+            size_t e = matchAngle(s, b); tparams(s, b + 1, std::min(e, s.size())); a = std::min(e + 1, s.size());
+            a = skipAttr(s, a);
+        }
+        return a;
+    }
+    bool tryFunc(const vector<XTok>& s, size_t a, const Sc& top) {  // declaração/definição de função (escopo global, namespace ou classe)
+        int ang = 0; size_t p = s.size();
+        for (size_t k = a; k < s.size(); k++) {
+            char c = s[k].k;
+            if (c == '<' && k > a && s[k - 1].k == 'i') { ang++; continue; }
+            if (c == '>' && ang > 0) { ang--; continue; }
+            if (ang > 0) continue;
+            if (c == '=') return false;
+            if (c == '(') { p = k; break; }
+        }
+        if (p >= s.size() || p <= a) return false;
+        const XTok& nt = s[p - 1]; if (nt.k != 'i') return false;
+        string name = tx(nt); if (kwTy(name) || xQual(name) || isAttrWord(nt)) return false;
+        size_t close = matchParen(s, p);
+        if (p >= 2 && s[p - 2].k == '~') { params(s, p + 1, close); return true; }  // destrutor
+        for (size_t k = a; k < p; k++) if (is(s[k], "operator")) return true;
+        size_t cs = p - 1; string owner = top.owner;
+        if (cs >= a + 2 && s[cs - 1].k == 'Q' && s[cs - 2].k == 'i') { owner = tx(s[cs - 2]); cs -= 2; while (cs >= a + 2 && s[cs - 1].k == 'Q' && s[cs - 2].k == 'i') cs -= 2; }
+        bool hasQual = cs != p - 1, typeTok = false, firstTok = true;
+        for (size_t k = a; k < cs; k++) if (s[k].k == 'i') { string w = tx(s[k]); if (xQual(w)) continue; if (firstTok && xNoDecl(w)) return false; firstTok = false; typeTok = true; }
+        if (!typeTok) { params(s, p + 1, close); return true; }  // construtor ou macro: só os parâmetros
+        if (!hasQual && p + 1 < s.size() && (s[p + 1].k == 'n' || s[p + 1].k == 'l')) return false;  // Foo x(3);  é variável
+        addSym(name, SK_FUNC, owner, ""); params(s, p + 1, close); return true;
+    }
+    Spec analyze(const vector<XTok>& s, char endCh) {
+        Spec sp; Sc& top = sc.back(); sp.owner = top.owner;
+        if (s.empty()) return sp;
+        bool exported = top.k == 'N' || top.k == 'C', local = top.k == 'F';
+        size_t a = skipAttr(s, 0); a = tplSkip(s, a); a = skipAttr(s, a);
+        if (a >= s.size()) return sp;
+        if (is(s[a], "extern") && a + 1 < s.size() && s[a + 1].k == 'l') {  // extern "C" { ... }
+            if (a + 2 == s.size()) { if (endCh == '{') sp.k = 'N'; return sp; }
+            a += 2;
+        }
+        if (is(s[a], "using")) {
+            if (a + 1 < s.size() && is(s[a + 1], "namespace")) return sp;
+            if (a + 2 < s.size() && s[a + 1].k == 'i' && s[a + 2].k == '=') { string nm = tx(s[a + 1]); if (local) addLocal(nm, SK_TYPE, ""); else addSym(nm, SK_TYPE, top.owner, ""); }
+            return sp;
+        }
+        bool td = false;
+        if (is(s[a], "typedef")) {
+            if (endCh != '{') {
+                string nm;
+                for (size_t k = a; k + 2 < s.size(); k++) if (s[k].k == '(' && s[k + 1].k == '*' && s[k + 2].k == 'i') { nm = tx(s[k + 2]); break; }
+                if (nm.empty()) for (size_t k = s.size(); k-- > a + 1;) if (s[k].k == 'i') { nm = tx(s[k]); break; }
+                if (!nm.empty() && !kwTy(nm)) { if (local) addLocal(nm, SK_TYPE, ""); else addSym(nm, SK_TYPE, top.owner, ""); }
+                return sp;
+            }
+            td = true; a++; if (a >= s.size()) return sp;
+        }
+        if (is(s[a], "namespace") || (is(s[a], "inline") && a + 1 < s.size() && is(s[a + 1], "namespace"))) {
+            size_t k = is(s[a], "inline") ? a + 2 : a + 1; string last = top.owner;
+            for (; k < s.size(); k++) {
+                if (s[k].k == 'i') { string nm = tx(s[k]); addSym(nm, SK_NS, top.owner, ""); last = nm; }
+                else if (s[k].k == 'Q') continue; else break;
+            }
+            if (endCh == '{') { sp.k = 'N'; sp.owner = last; }
+            return sp;
+        }
+        // class / struct / union / enum
+        size_t kwi = string::npos;
+        { int d = 0;
+          for (size_t k = a; k < s.size(); k++) {
+              if (s[k].k == '(') d++; else if (s[k].k == ')') { if (d > 0) d--; }
+              else if (d == 0 && (is(s[k], "struct") || is(s[k], "class") || is(s[k], "union") || is(s[k], "enum"))) { kwi = k; break; }
+              else if (d == 0 && s[k].k == '=') break;
+          } }
+        bool isFriend = false;
+        if (kwi != string::npos) for (size_t k = a; k < kwi; k++) { if (is(s[k], "friend")) isFriend = true; else if (!(s[k].k == 'i' && (xQual(tx(s[k])) || is(s[k], "typedef")))) { kwi = string::npos; break; } }
+        if (kwi != string::npos) {
+            bool isEnum = is(s[kwi], "enum"); size_t k = kwi + 1;
+            if (isEnum && k < s.size() && (is(s[k], "class") || is(s[k], "struct"))) k++;
+            string name; int nid = 0; bool hadParen = false;
+            for (; k < s.size(); k++) {
+                const XTok& x = s[k];
+                if (x.k == '(') { if (k > 0 && isAttrWord(s[k - 1])) { k = matchParen(s, k); continue; } hadParen = true; break; }
+                if (x.k == '[') { size_t e = skipAttr(s, k); if (e == k) break; k = e - 1; continue; }
+                if (x.k == ':' || x.k == '<' || x.k == '=' || x.k == ';' || x.k == '{') break;
+                if (x.k == 'i' && !is(x, "final") && !isAttrWord(x)) { name = tx(x); nid++; }
+            }
+            size_t after = k; if (after < s.size() && s[after].k == '<') { size_t e = matchAngle(s, after); after = e < s.size() ? e + 1 : s.size(); }
+            bool atEnd = after >= s.size(), colon = !atEnd && s[after].k == ':', fin = !atEnd && is(s[after], "final");
+            bool def = !hadParen && endCh == '{' && (atEnd || colon || fin);
+            bool fwd = !hadParen && endCh == ';' && nid == 1 && (atEnd || colon);
+            if (def || fwd) {
+                if (isFriend) return sp;
+                string bases;
+                if (def && !isEnum && colon) {  // classes base: último componente de cada nome
+                    int ang = 0;
+                    for (size_t b = after + 1; b < s.size(); b++) {
+                        if (s[b].k == '<') ang++; else if (s[b].k == '>') { if (ang > 0) ang--; }
+                        else if (ang == 0 && s[b].k == 'i') { string w = tx(s[b]); if (w == "public" || w == "private" || w == "protected" || w == "virtual") continue; if (b + 1 < s.size() && s[b + 1].k == 'Q') continue; if (!bases.empty()) bases += ','; bases += w; }
+                    }
+                }
+                if (!name.empty() && !kwTy(name)) { if (local && endCh == '{') addLocal(name, SK_TYPE, ""); addSym(name, SK_TYPE, top.owner, bases); }
+                if (def) { sp.k = isEnum ? 'E' : 'C'; sp.owner = name.empty() ? (isEnum ? string() : top.owner) : name; sp.td = td; }
+                return sp;
+            }
+        }
+        if (!exported && !local) return sp;
+        if (exported && tryFunc(s, a, top)) return sp;
+        if (is(s[a], "friend")) return sp;
+        declList(s, a, s.size(), true, [&](const Dec& d) {
+            for (auto& n : d.binds) addLocal(n, SK_VAR, "");
+            if (d.name.empty()) return;
+            if (exported) addSym(d.name, d.isConst ? SK_CONST : SK_VAR, top.owner, d.type); else addLocal(d.name, SK_VAR, d.type);
+        });
+        return sp;
+    }
+};
+static void xParseText(const string& text, XFile& f) { XParser p(text, f); p.run(); }
+// ---- armazenamento e contagem global de nomes
+static vector<XFile> xFiles; static std::unordered_map<string, int> xMap;  // pathKey -> índice em xFiles
+static size_t xSymTotal = 0;
+static void xBestOf(XAgg& a) { static const uint8_t pr[] = {SK_TYPE, SK_NS, SK_CONST, SK_FUNC, SK_VAR}; a.best = 0; for (uint8_t k : pr) if (a.c[k]) { a.best = k; break; } }
+static void aggAdd(const XSym& s) {
+    auto it = xAgg.find(s.name); if (it == xAgg.end()) { it = xAgg.emplace(s.name, XAgg()).first; xNames.insert(s.name); }
+    if (it->second.c[s.kind] < 65535) it->second.c[s.kind]++; xBestOf(it->second);
+}
+static void aggDel(const XSym& s) {
+    auto it = xAgg.find(s.name); if (it == xAgg.end()) return;
+    if (it->second.c[s.kind]) it->second.c[s.kind]--;
+    bool any = false; for (int k = 0; k < SK_N; k++) if (it->second.c[k]) any = true;
+    if (!any) { xNames.erase(s.name); xAgg.erase(it); } else xBestOf(it->second);
+}
+static long long xNowMs() { return (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+static int xFileId(const string& path) { auto it = xMap.find(pathKey(path)); return it == xMap.end() ? -1 : it->second; }
+static string xDirOf(const string& p) { return pstr(toPath(p).parent_path()); }
+static string xNorm(const fs::path& p) { return pstr(p.lexically_normal()); }
+
+// ---- diretórios de include (projeto + dependências) e diretórios do sistema
+static vector<string> xInc;              // onde procurar #include (ordem de prioridade)
+static vector<string> xSys;              // diretórios do sistema (só para completar caminhos; nunca indexados)
+static std::set<string> xDepNames;       // dependências declaradas no rsfmake.toml / CMakeLists.txt
+struct XDirEnt { string name; bool dir; };
+struct XDirCache { long long t = 0; vector<XDirEnt> ents; };
+static std::unordered_map<string, XDirCache> xDirCache;
+static const vector<XDirEnt>& xList(const string& dir) {  // listagem de UM diretório, com cache curto (não recursivo)
+    long long now = xNowMs(); auto it = xDirCache.find(dir);
+    if (it != xDirCache.end() && now - it->second.t < 4000) return it->second.ents;
+    if (xDirCache.size() > 80) xDirCache.clear();
+    XDirCache& c = xDirCache[dir]; c.t = now; c.ents.clear(); std::error_code ec;
+    fs::directory_iterator di(toPath(dir), fs::directory_options::skip_permission_denied, ec), end;
+    for (; !ec && di != end && c.ents.size() < 8000; di.increment(ec)) {
+        string nm = pstr(di->path().filename()); if (nm.empty() || nm[0] == '.') continue;
+        std::error_code e2; c.ents.push_back({nm, di->is_directory(e2)});
+    }
+    return c.ents;
+}
+static void xInitSys() {
+    xSys.clear();
+#ifdef _WIN32
+    if (const wchar_t* e = _wgetenv(L"INCLUDE")) { string s = wu8(e); size_t a = 0; while (a <= s.size()) { size_t z = s.find(';', a); if (z == string::npos) z = s.size(); if (z > a) xSys.push_back(s.substr(a, z - a)); a = z + 1; } }
+#else
+    for (const char* v : {"CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH"}) if (const char* e = getenv(v)) { string s = e; size_t a = 0; while (a <= s.size()) { size_t z = s.find(':', a); if (z == string::npos) z = s.size(); if (z > a) xSys.push_back(s.substr(a, z - a)); a = z + 1; } }
+    xSys.push_back("/usr/local/include"); xSys.push_back("/usr/include");
+#ifdef __APPLE__
+    xSys.push_back("/opt/homebrew/include"); xSys.push_back("/opt/local/include");
+#endif
+#endif
+}
+static bool xAddInc(const string& dir) {
+    if (dir.empty() || xInc.size() >= 64) return false; std::error_code ec; fs::path p = toPath(dir);
+    if (!fs::is_directory(p, ec)) return false; string n = xNorm(p); while (n.size() > 1 && (n.back() == '/' || n.back() == '\\')) n.pop_back();
+    for (auto& e : xInc) if (samePath(e, n)) return false; xInc.push_back(n); return true;
+}
+static void xAddDepDirs(const fs::path& D) {  // uma dependência: a pasta, e include/ ou inc/ dentro dela
+    xAddInc(pstr(D)); for (const char* s : {"include", "inc"}) xAddInc(pstr(D / s));
+}
+static bool xAbs(const string& p) { return !p.empty() && (p[0] == '/' || p[0] == '\\' || (p.size() > 1 && p[1] == ':')); }
+static void xGuessDep(const string& name) {  // acha a pasta da dependência em lugares convencionais (listando só alguns diretórios)
+    if (name.empty() || name.size() > 80) return; string ln = lowerA(name); xDepNames.insert(name);
+    for (const char* r : {"deps", "dependencies", "vendor", "third_party", "thirdparty", "third-party", "external", "extern", "libs", "lib", "packages", ".deps", ".rsfmake/deps", ".rsfmake", "build/_deps", "build/deps", "target/deps"}) {
+        string dir = root + SEP + r; std::error_code ec; if (!fs::is_directory(toPath(dir), ec)) continue;
+        for (auto& e : xList(dir)) { if (!e.dir) continue; string le = lowerA(e.name); if (le == ln || startsWith(le, ln + "-") || startsWith(le, ln + "_")) xAddDepDirs(toPath(dir) / toPath(e.name)); }
+    }
+    for (auto& sysd : xSys) {  // /usr/include/SDL2, /usr/local/include/opencv4 ...
+        std::error_code ec; if (!fs::is_directory(toPath(sysd), ec)) continue;
+        for (auto& e : xList(sysd)) { if (!e.dir) continue; string le = lowerA(e.name); if (le == ln || (ln.size() >= 3 && startsWith(le, ln))) xAddInc(sysd + SEP + e.name); }
+    }
+}
+static string xReadSmall(const string& p, size_t cap = 262144) {
+    std::ifstream f(toPath(p), std::ios::binary); if (!f) return string(); string s(cap, '\0'); f.read(&s[0], (std::streamsize)cap); s.resize((size_t)f.gcount()); return s;
+}
+static string xTrim(const string& s) { size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n"); return a == string::npos ? string() : s.substr(a, b - a + 1); }
+static void xAddPathMaybe(const string& v, const string& base) {  // valor de texto do toml: se for um caminho de pasta existente, é uma dependência local
+    if (v.empty() || v.find("://") != string::npos || startsWith(v, "git@")) return; std::error_code ec;
+    fs::path p = xAbs(v) ? toPath(v) : toPath(base) / toPath(v);
+    if (fs::is_directory(p, ec)) xAddDepDirs(p);
+}
+// rsfmake.toml: lê só [dependencies] (e [dependencies.nome]); aceita  nome = "versão" | nome = { path = "...", include = [...] } | listas de nomes.
+static void xParseToml() {
+    string txt = xReadSmall(root + SEP + "rsfmake.toml"); if (txt.empty()) return;
+    std::istringstream is(txt); string line, sec, subName; bool inDep = false;
+    auto quoted = [](const string& s, vector<string>& out) {  // todas as "strings" de um trecho
+        for (size_t i = 0; i < s.size(); i++) if (s[i] == '"' || s[i] == '\'') { char q = s[i]; size_t z = s.find(q, i + 1); if (z == string::npos) break; out.push_back(s.substr(i + 1, z - i - 1)); i = z; }
+    };
+    auto strip = [](string l) { bool in = false; char q = 0; for (size_t i = 0; i < l.size(); i++) { if (in) { if (l[i] == q) in = false; } else if (l[i] == '"' || l[i] == '\'') { in = true; q = l[i]; } else if (l[i] == '#') { l.resize(i); break; } } return xTrim(l); };
+    auto handle = [&](const string& key, const string& val) {  // uma entrada dentro de [dependencies]
+        string k = xTrim(key); if (!k.empty() && (k[0] == '"' || k[0] == '\'')) k = k.substr(1, k.size() >= 2 ? k.size() - 2 : 0);
+        vector<string> strs; quoted(val, strs); string lk = lowerA(k);
+        bool pathKey2 = lk == "path" || lk == "dir" || lk == "root" || lk == "src" || lk == "source" || lk == "include" || lk == "includes" || lk == "include_dir" || lk == "include_dirs" || lk == "include-dirs" || lk == "inc" || lk == "headers";
+        if (!subName.empty() && !pathKey2) return;
+        if (!subName.empty()) { for (auto& s : strs) xAddPathMaybe(s, root); return; }
+        if (lk == "dependencies" || lk == "deps") { for (auto& s : strs) { xGuessDep(s); } return; }  // dependencies = ["a", "b"]
+        xGuessDep(k);
+        if (val.find('{') != string::npos) {  // inline table: path = "..." include = [...]
+            size_t p = 0; while ((p = val.find('=', p)) != string::npos) {
+                size_t ks = p; while (ks > 0 && (isalnum((unsigned char)val[ks - 1]) || val[ks - 1] == '_' || val[ks - 1] == '-' || val[ks - 1] == ' ')) ks--;
+                string kk = lowerA(xTrim(val.substr(ks, p - ks))); size_t vend = val.find_first_of(",}", p); string vv = val.substr(p + 1, vend == string::npos ? string::npos : vend - p - 1);
+                if (vv.find('[') != string::npos) { size_t cl = val.find(']', p); vv = val.substr(p + 1, cl == string::npos ? string::npos : cl - p); }
+                vector<string> ss; quoted(vv, ss);
+                if (kk == "path" || kk == "dir" || kk == "root" || kk == "src" || kk == "source" || kk == "include" || kk == "includes" || kk == "include_dir" || kk == "include_dirs" || kk == "include-dirs" || kk == "inc") for (auto& s : ss) xAddPathMaybe(s, root);
+                p++;
+            }
+        } else for (auto& s : strs) xAddPathMaybe(s, root);  // nome = "../caminho"
+    };
+    string pend, pendKey; int depth = 0;
+    while (std::getline(is, line)) {
+        string l = strip(line); if (l.empty()) continue;
+        if (depth > 0) {  // valor multilinha ([ ... ] ou { ... })
+            pend += " " + l; for (char c : l) { if (c == '[' || c == '{') depth++; else if (c == ']' || c == '}') depth--; }
+            if (depth <= 0) { depth = 0; if (inDep) handle(pendKey, pend); pend.clear(); }
+            continue;
+        }
+        if (l[0] == '[') {
+            size_t z = l.find(']'); sec = lowerA(xTrim(l.substr(l[1] == '[' ? 2 : 1, z == string::npos ? string::npos : z - (l[1] == '[' ? 2 : 1)))); subName.clear();
+            inDep = sec == "dependencies" || sec == "dev-dependencies" || sec == "dev_dependencies";
+            if (startsWith(sec, "dependencies.")) { inDep = true; subName = sec.substr(13); xGuessDep(subName); }
+            continue;
+        }
+        size_t eq = l.find('='); if (eq == string::npos) { if (inDep && subName.empty() && l[0] == '"') { vector<string> ss; quoted(l, ss); for (auto& s : ss) xGuessDep(s); } continue; }
+        string key = l.substr(0, eq), val = xTrim(l.substr(eq + 1));
+        if (!inDep) { string lk = lowerA(xTrim(key)); if (lk == "dependencies" || lk == "deps") inDep = false; else continue; }
+        int d = 0; for (char c : val) { if (c == '[' || c == '{') d++; else if (c == ']' || c == '}') d--; }
+        if (d > 0) { pend = val; pendKey = key; depth = d; continue; }
+        if (!inDep) { if (lowerA(xTrim(key)) == "dependencies" || lowerA(xTrim(key)) == "deps") { bool keep = inDep; inDep = true; handle(key, val); inDep = keep; } continue; }
+        handle(key, val);
+    }
+    if (depth > 0 && inDep) handle(pendKey, pend);
+}
+// CMakeLists.txt: include_directories / target_include_directories / add_subdirectory / find_package / FetchContent / target_link_libraries / set(VAR ...)
+static string xCmakeExpand(string s, const std::map<string, string>& vars, const string& cur) {
+    for (int guard = 0; guard < 8; guard++) {
+        size_t a = s.find("${"); if (a == string::npos) return s; size_t z = s.find('}', a); if (z == string::npos) return string();
+        string n = s.substr(a + 2, z - a - 2), v;
+        if (n == "CMAKE_SOURCE_DIR" || n == "PROJECT_SOURCE_DIR" || n == "CMAKE_HOME_DIRECTORY") v = root;
+        else if (n == "CMAKE_CURRENT_SOURCE_DIR" || n == "CMAKE_CURRENT_LIST_DIR") v = cur;
+        else if (n == "CMAKE_BINARY_DIR" || n == "PROJECT_BINARY_DIR" || n == "CMAKE_CURRENT_BINARY_DIR") v = root + SEP + "build";
+        else { auto it = vars.find(n); if (it == vars.end()) return string(); v = it->second; }
+        s.replace(a, z - a + 1, v);
+    }
+    return string();
+}
+static void xParseCMake(const string& dir, int depth, int& budget, std::map<string, string>& vars) {
+    if (depth > 4 || budget <= 0) return; budget--;
+    string txt = xReadSmall(dir + SEP + "CMakeLists.txt"); if (txt.empty()) return;
+    size_t n = txt.size(), i = 0;
+    auto isKw = [](const string& a) { static const std::unordered_set<string> K = {"PUBLIC", "PRIVATE", "INTERFACE", "SYSTEM", "AFTER", "BEFORE", "STATIC", "SHARED", "OBJECT", "REQUIRED", "QUIET", "COMPONENTS", "CONFIG", "MODULE", "EXACT", "NO_MODULE", "IMPORTED_TARGET", "GLOBAL", "debug", "optimized", "general"}; return K.count(a) > 0; };
+    while (i < n) {
+        char c = txt[i];
+        if (c == '#') { while (i < n && txt[i] != '\n') i++; continue; }
+        if (!(isalpha((unsigned char)c) || c == '_')) { i++; continue; }
+        size_t j = i; while (j < n && (isalnum((unsigned char)txt[j]) || txt[j] == '_')) j++;
+        string cmd = lowerA(txt.substr(i, j - i)); size_t p = j; while (p < n && isspace((unsigned char)txt[p])) p++;
+        if (p >= n || txt[p] != '(') { i = j; continue; }
+        p++; int d = 1; vector<string> args; string cur; bool inq = false;
+        for (; p < n && d > 0; p++) {
+            char ch = txt[p];
+            if (inq) { if (ch == '\\' && p + 1 < n) { cur += txt[++p]; } else if (ch == '"') inq = false; else cur += ch; continue; }
+            if (ch == '#') { while (p < n && txt[p] != '\n') p++; continue; }
+            if (ch == '"') { inq = true; continue; }
+            if (ch == '(') { d++; cur += ch; continue; }
+            if (ch == ')') { d--; if (d == 0) break; cur += ch; continue; }
+            if (isspace((unsigned char)ch)) { if (!cur.empty()) { args.push_back(cur); cur.clear(); } continue; }
+            cur += ch;
+        }
+        if (!cur.empty()) args.push_back(cur); i = p + 1;
+        auto resolvePath = [&](string a) -> string {
+            if (a.compare(0, 2, "$<") == 0) { size_t colon = a.find(':'); if (a.compare(0, 18, "$<BUILD_INTERFACE:") != 0 || colon == string::npos) return string(); a = a.substr(colon + 1); if (!a.empty() && a.back() == '>') a.pop_back(); }
+            a = xCmakeExpand(a, vars, dir); if (a.empty() || a.find("$<") != string::npos) return string();
+            return xAbs(a) ? a : dir + SEP + a;
+        };
+        if (cmd == "set" && args.size() >= 2) { string v = xCmakeExpand(args[1], vars, dir); if (!v.empty() && args.size() == 2) vars[args[0]] = v; }
+        else if (cmd == "include_directories" || cmd == "target_include_directories") {
+            for (size_t k = cmd == "include_directories" ? 0 : 1; k < args.size(); k++) { if (isKw(args[k])) continue; string rp = resolvePath(args[k]); if (!rp.empty()) xAddInc(rp); }
+        } else if (cmd == "add_subdirectory" && !args.empty()) {
+            string sub = xCmakeExpand(args[0], vars, dir); if (!sub.empty()) { fs::path sp = xAbs(sub) ? toPath(sub) : toPath(dir) / toPath(sub); std::error_code ec; if (fs::is_directory(sp, ec)) { xAddDepDirs(sp); xParseCMake(pstr(sp), depth + 1, budget, vars); } }
+        } else if (cmd == "find_package" && !args.empty()) xGuessDep(args[0]);
+        else if (cmd == "fetchcontent_declare" && !args.empty()) xGuessDep(args[0]);
+        else if (cmd == "fetchcontent_makeavailable") { for (auto& a : args) xGuessDep(a); }
+        else if (cmd == "pkg_check_modules" && args.size() > 1) { for (size_t k = 1; k < args.size(); k++) if (!isKw(args[k])) { string m = args[k]; size_t cut = m.find_first_of("<>="); if (cut != string::npos) m.resize(cut); xGuessDep(m); } }
+        else if (cmd == "target_link_libraries" && args.size() > 1) {
+            static const std::unordered_set<string> sysl = {"m", "dl", "pthread", "Threads", "rt", "stdc++fs", "c++fs", "stdc++", "gdi32", "user32", "kernel32", "ws2_32", "opengl32"};
+            for (size_t k = 1; k < args.size(); k++) { string a = args[k]; if (isKw(a) || a[0] == '-' || a.find("${") != string::npos || a.find("$<") != string::npos) continue; size_t cc = a.find("::"); if (cc != string::npos) a.resize(cc); if (a.find_first_of("/\\.") != string::npos || sysl.count(a)) continue; xGuessDep(a); }
+        }
+    }
+}
+static const long long X_NOFILE = LLONG_MIN;  // (a época do relógio de arquivos varia por plataforma: o valor pode ser negativo, então não dá para usar -1)
+static long long xFileStamp(const string& p) { std::error_code ec; auto t = fs::last_write_time(toPath(p), ec); return ec ? X_NOFILE : (long long)t.time_since_epoch().count(); }
+static long long xBuildM[2] = {0, 0};
+static size_t xIncCursor = 0;
+static void xScanBuild() {  // recalcula os diretórios de include (leve: lê 2 arquivos pequenos e lista poucos diretórios)
+    xInc.clear(); xDepNames.clear(); xDirCache.clear(); if (root.empty()) return;
+    xBuildM[0] = xFileStamp(root + SEP + "rsfmake.toml"); xBuildM[1] = xFileStamp(root + SEP + "CMakeLists.txt");
+    for (const char* d : {"include", "src", "inc", "."}) { string dir = string(d) == "." ? root : root + SEP + d; xAddInc(dir); }
+    if (xBuildM[0] != X_NOFILE) xParseToml();
+    if (xBuildM[1] != X_NOFILE) { int budget = 24; std::map<string, string> vars; xParseCMake(root, 0, budget, vars); }
+    if (const char* vr = getenv("VCPKG_ROOT")) { std::error_code ec; string ins = string(vr) + SEP + "installed"; if (fs::is_directory(toPath(ins), ec)) for (auto& e : xList(ins)) if (e.dir && e.name != "vcpkg") xAddInc(ins + SEP + e.name + SEP + "include"); }
+    { std::error_code ec; string ins = root + SEP + "vcpkg_installed"; if (fs::is_directory(toPath(ins), ec)) for (auto& e : xList(ins)) if (e.dir && e.name != "vcpkg") xAddInc(ins + SEP + e.name + SEP + "include"); }
+    xIncCursor = 0;  // reavalia os #include dos arquivos já indexados (em fatias)
+}
+
+// ---- fila de trabalho: diretórios a percorrer e arquivos a indexar
+struct XJob { string path; int depth; bool dep; };
+static std::deque<XJob> xJobs; static std::deque<std::pair<string, int>> xDirs; static std::unordered_set<string> xQueued;
+static int xProj = 0, xDepFiles = 0; static uint64_t xDepBytes = 0;
+static bool xSkipDir(const string& n) {
+    if (n.empty() || n[0] == '.') return true; string l = lowerA(n);
+    static const std::unordered_set<string> S = {"build", "out", "target", "bin", "obj", "node_modules", "cmake-build-debug", "cmake-build-release", "cmakefiles", "_deps", "dist", "venv", "__pycache__", "debug", "release", "x64",
+                                                 "testing", "vendor", "third_party", "thirdparty", "third-party", "external", "extern", "deps", "dependencies", "vcpkg_installed", "packages"};
+    return S.count(l) > 0 || startsWith(l, "cmake-build-");
+}
+static string xResolve(const string& fromDir, const XInc& inc) {
+    std::error_code ec; auto test = [&](const fs::path& p) -> string { if (fs::is_regular_file(p, ec)) return xNorm(p); return string(); };
+    fs::path rel = toPath(inc.name); string r;
+    if (xAbs(inc.name)) return test(rel);
+    if (inc.quoted && !fromDir.empty()) { r = test(toPath(fromDir) / rel); if (!r.empty()) return r; }
+    for (auto& d : xInc) { r = test(toPath(d) / rel); if (!r.empty()) return r; }
+    return string();
+}
+static void xQueueIncludes(int id) {  // põe na fila os headers incluídos (projeto e dependências), com limites de profundidade/quantidade
+    if (id < 0 || id >= (int)xFiles.size()) return; int depth = xFiles[id].depth; if (depth >= 2) return;
+    string dir = xDirOf(xFiles[id].path); vector<XInc> incs = xFiles[id].incs;
+    for (auto& inc : incs) {
+        string rp = xResolve(dir, inc); if (rp.empty()) continue; string key = pathKey(rp);
+        if (xMap.count(key) || xQueued.count(key) || !isSrcPath(rp)) continue;
+        bool inRoot = startsWith(key, pathKey(root) + SEP) && !startsWith(lowerA(rp.substr(root.size() + 1)), "build" SEP);
+        if (!inRoot) { if (xDepFiles >= 500 || xDepBytes > 16u * 1024 * 1024) continue; xDepFiles++; }
+        xQueued.insert(key); xJobs.push_back({rp, depth + 1, !inRoot});
+    }
+}
+static void xRemove(int id) {
+    XFile& f = xFiles[id]; for (auto& s : f.syms) aggDel(s); xSymTotal -= std::min(xSymTotal, f.syms.size());
+    f.syms.clear(); f.locals.clear(); f.ltype.clear(); f.incs.clear(); f.dead = true; xMap.erase(pathKey(f.path));
+}
+static int xStore(const string& path, const string& text, bool live, long long mtime, uint64_t size, int depth, bool dep) {
+    string key = pathKey(path); auto it = xMap.find(key); int id;
+    if (it == xMap.end()) { id = (int)xFiles.size(); xFiles.emplace_back(); xMap[key] = id; xFiles[id].path = path; }
+    else { id = it->second; for (auto& s : xFiles[id].syms) aggDel(s); xSymTotal -= std::min(xSymTotal, xFiles[id].syms.size()); xFiles[id].syms.clear(); xFiles[id].locals.clear(); xFiles[id].ltype.clear(); xFiles[id].incs.clear(); }
+    XFile& f = xFiles[id]; f.dead = false; f.live = live; f.mtime = mtime; f.size = size; if (!live || it == xMap.end()) { f.depth = depth; f.dep = dep; }
+    if (xSymTotal < 400000) xParseText(text, f);
+    for (auto& s : f.syms) aggAdd(s); xSymTotal += f.syms.size();
+    xQueueIncludes(id); return id;
+}
+static void xIndexDisk(const XJob& j) {
+    std::error_code ec; uint64_t sz = (uint64_t)fs::file_size(toPath(j.path), ec); if (ec) return;
+    if (sz > (j.dep ? 300u * 1024 : 1024u * 1024)) return;
+    std::ifstream f(toPath(j.path), std::ios::binary); if (!f) return; string text(sz, '\0'); f.read(&text[0], (std::streamsize)sz); text.resize((size_t)f.gcount());
+    if (text.find('\0') != string::npos) return;
+    if (j.dep) xDepBytes += sz;
+    xStore(j.path, text, false, xFileStamp(j.path), sz, j.depth, j.dep);
+}
+static void xWalk(const string& dir, int depth) {
+    std::error_code ec; fs::directory_iterator di(toPath(dir), fs::directory_options::skip_permission_denied, ec), end; int guard = 0;
+    for (; !ec && di != end && guard < 5000; di.increment(ec), guard++) {
+        string nm = pstr(di->path().filename()); std::error_code e2;
+        if (di->is_directory(e2)) { if (depth < 14 && !xSkipDir(nm)) xDirs.push_back({pstr(di->path()), depth + 1}); continue; }
+        if (!isSrcPath(nm) || xProj >= 4000) continue; string p = pstr(di->path()), key = pathKey(p);
+        if (xMap.count(key) || xQueued.count(key)) continue; xQueued.insert(key); xProj++; xJobs.push_back({p, 0, false});
+    }
+}
+static void xReset() {
+    xAgg.clear(); xNames.clear(); xFiles.clear(); xMap.clear(); xJobs.clear(); xDirs.clear(); xQueued.clear(); xDirCache.clear(); xInc.clear(); xDepNames.clear();
+    xSymTotal = 0; xProj = 0; xDepFiles = 0; xDepBytes = 0; xIncCursor = 0; gLocals = nullptr; xInitSys();
+    if (!root.empty()) { xScanBuild(); xDirs.push_back({root, 0}); }
+}
+static void xRescan() { if (!root.empty()) { xProj = 0; for (auto& f : xFiles) if (!f.dead && !f.dep) xProj++; xDirs.push_back({root, 0}); xScanBuild(); } }
+static bool xBusy() { return !xDirs.empty() || !xJobs.empty() || xIncCursor < xFiles.size(); }
+
+// ---- buffers abertos: reindexa o texto em edição (debounce) para o realce e o autocomplete refletirem o que foi digitado
+static uint64_t xHashBuf(const Buffer& b) { uint64_t h = 1469598103934665603ull; for (auto& l : b.lines) { for (unsigned char c : l) { h ^= c; h *= 1099511628211ull; } h ^= 10; h *= 1099511628211ull; } return h ? h : 1; }
+static const XFile* xFileOf(Buffer& b) {  // arquivo indexado do buffer (ou nullptr); guarda o id no buffer
+    if (b.xid >= 0 && b.xid < (int)xFiles.size() && !xFiles[b.xid].dead && xFiles[b.xid].path == b.path) return &xFiles[b.xid];
+    int id = xFileId(b.path); b.xid = id; return id >= 0 ? &xFiles[id] : nullptr;
+}
+static const std::unordered_map<string, uint8_t>* xLocalsOf(Buffer& b) { const XFile* f = xFileOf(b); return f ? &f->locals : nullptr; }
+static void xLive(long long now) {
+    static long long last = 0; if (now - last < 150) return; last = now;
+    vector<int> vis; vis.push_back(cur); for (auto& p : panes) if (p.buf >= 0 && p.buf < (int)bufs.size() && p.buf != cur) vis.push_back(p.buf);
+    for (int i : vis) {
+        if (i < 0 || i >= (int)bufs.size()) continue; Buffer& b = bufs[i]; if (!isSrcPath(b.path)) continue;
+        const XFile* f = xFileOf(b); bool known = f && f->live && b.xHash != 0;
+        if (!(b.dirty || !known || b.xPend != 0)) continue;
+        size_t total = 0; for (auto& l : b.lines) total += l.size() + 1; if (total > 2u * 1024 * 1024) continue;
+        uint64_t h = xHashBuf(b); if (known && h == b.xHash) { b.xPend = 0; continue; }
+        if (known && h != b.xPend) { b.xPend = h; b.xEdit = now; continue; }
+        if (known && now - b.xEdit < 300) continue;
+        string text; text.reserve(total); for (auto& l : b.lines) { text += l; text += '\n'; }
+        int depth = f ? f->depth : 0; bool dep = f ? f->dep : false;
+        b.xid = xStore(b.path, text, true, f ? f->mtime : 0, text.size(), depth, dep); b.xHash = h; b.xPend = 0;
+    }
+}
+static size_t xSweepCur = 0;
+static void xSweep(long long now) {  // a cada ~2 s: confere alguns arquivos (apagados/alterados fora do editor) e os arquivos de build
+    static long long last = 0; if (now - last < 2000) return; last = now;
+    for (int k = 0; k < 16 && !xFiles.empty(); k++) {
+        if (xSweepCur >= xFiles.size()) xSweepCur = 0; int id = (int)xSweepCur++; XFile& f = xFiles[id]; if (f.dead) continue;
+        if (f.live) {  // buffer fechado sem estar mais aberto: volta a valer o conteúdo do disco
+            bool open = false; for (auto& b : bufs) if (samePath(b.path, f.path)) { open = true; break; }
+            if (!open) { f.live = false; f.mtime = -2; }
+        }
+        if (f.live) continue; long long st = xFileStamp(f.path);
+        if (st == X_NOFILE) { xRemove(id); continue; }
+        if (st != f.mtime) { string key = pathKey(f.path); if (!xQueued.count(key)) { xQueued.insert(key); xJobs.push_front({f.path, f.depth, f.dep}); } }
+    }
+    if (!root.empty() && (xFileStamp(root + SEP + "rsfmake.toml") != xBuildM[0] || xFileStamp(root + SEP + "CMakeLists.txt") != xBuildM[1])) xScanBuild();
+}
+// Fatias de ~3 ms: nunca bloqueia a digitação.
+static void xTick() {
+    if (root.empty()) return; long long t0 = xNowMs();
+    while (xNowMs() - t0 < 3) {
+        if (!xDirs.empty()) { auto d = xDirs.front(); xDirs.pop_front(); xWalk(d.first, d.second); }
+        else if (!xJobs.empty()) { XJob j = xJobs.front(); xJobs.pop_front(); xQueued.erase(pathKey(j.path)); int id = xFileId(j.path); if (id < 0 || xFiles[id].mtime != xFileStamp(j.path) || xFiles[id].dead) xIndexDisk(j); }
+        else if (xIncCursor < xFiles.size()) { int id = (int)xIncCursor++; if (!xFiles[id].dead) xQueueIncludes(id); }
+        else break;
+    }
+    long long now = xNowMs(); xLive(now); xSweep(now);
+}
+static int xWantMs() {  // quanto o laço principal pode esperar por teclas sem atrasar o índice (-1 = indefinido)
+    if (xBusy()) return 10;
+    for (int i = 0; i < (int)bufs.size(); i++) if (i == cur && isSrcPath(bufs[i].path) && (bufs[i].dirty || bufs[i].xPend)) return 150;
+    return -1;
+}
+
+// ---- consultas para o autocomplete
+static const char* xTag(uint8_t k) { switch (k) { case SK_TYPE: return "type"; case SK_FUNC: return "fn"; case SK_VAR: return "var"; case SK_CONST: return "const"; case SK_NS: return "ns"; } return ""; }
+static void xOwners(const string& type, std::set<string>& owners, int depth) {  // a classe e suas bases (até 4 níveis)
+    if (type.empty() || !owners.insert(type).second || depth > 4) return;
+    for (auto& f : xFiles) if (!f.dead) for (auto& s : f.syms) if (s.kind == SK_TYPE && s.name == type && !s.type.empty()) {
+        size_t a = 0; while (a <= s.type.size()) { size_t z = s.type.find(',', a); if (z == string::npos) z = s.type.size(); if (z > a) xOwners(s.type.substr(a, z - a), owners, depth + 1); a = z + 1; }
+    }
+}
+static string xVarType(Buffer& b, const string& obj) {  // tipo declarado de uma variável (local do arquivo, senão global/membro)
+    if (const XFile* f = xFileOf(b)) { auto it = f->ltype.find(obj); if (it != f->ltype.end()) return it->second; }
+    for (auto& f : xFiles) if (!f.dead) for (auto& s : f.syms) if (s.kind == SK_VAR && s.name == obj && !s.type.empty()) return s.type;
+    return string();
+}
+// Membros (funções, campos, enumeradores, tipos aninhados) cujos donos estão em `owners`; anyOwner = qualquer membro de qualquer classe.
+static void xMembers(const std::set<string>& owners, bool anyOwner, const string& word, vector<std::pair<string, uint8_t>>& out) {
+    std::map<string, uint8_t> found;
+    for (auto& f : xFiles) {
+        if (f.dead) continue;
+        for (auto& s : f.syms) {
+            if (s.owner.empty() || s.name == word || s.kind == SK_NS) continue; if (!anyOwner && !owners.count(s.owner)) continue;
+            if (!word.empty() && !startsWith(s.name, word)) continue; found.emplace(s.name, s.kind); if (found.size() >= 400) break;
+        }
+        if (found.size() >= 400) break;
+    }
+    for (auto& kv : found) { out.push_back({kv.first, kv.second}); if (out.size() >= 80) break; }
+}
+static bool xIsHeaderName(const string& n, bool sysBase) {
+    size_t d = n.rfind('.'); if (d == string::npos) return sysBase;
+    string e = lowerA(n.substr(d)); return e == ".h" || e == ".hh" || e == ".hpp" || e == ".hxx" || e == ".h++" || e == ".ipp" || e == ".inl" || e == ".tpp" || e == ".cuh";
+}
+// Caminhos para #include: lista só os diretórios necessários (um nível por vez, com cache) em: pasta do arquivo, pastas de include do
+// projeto/dependências (rsfmake.toml / CMakeLists.txt) e do sistema. `pre` = texto já digitado entre < > ou " ".
+static size_t xIncludeItems(const Buffer& b, bool quoted, const string& pre, vector<string>& out) {
+    size_t sl = pre.find_last_of("/\\"); string dirPart = sl == string::npos ? string() : pre.substr(0, sl + 1), name = sl == string::npos ? pre : pre.substr(sl + 1);
+    string ln = lowerA(name); std::set<string> seen; vector<string> groups[3];  // 0 projeto/dependências · 1 sistema
+    auto scan = [&](const string& base, int g, bool sys) {
+        string dir = dirPart.empty() ? base : base + SEP + dirPart; std::error_code ec; if (!fs::is_directory(toPath(dir), ec)) return;
+        for (auto& e : xList(dir)) {
+            if (!ln.empty() && !startsWith(lowerA(e.name), ln)) continue;
+            if (!e.dir && !xIsHeaderName(e.name, sys)) continue; if (e.dir && (e.name == "CMakeFiles" || e.name == "build")) continue;
+            string item = dirPart + e.name + (e.dir ? "/" : ""); if (seen.insert(item).second) groups[g].push_back(item);
+        }
+    };
+    if (quoted) scan(xDirOf(b.path), 0, false);
+    for (auto& d : xInc) scan(d, 0, false);
+    for (auto& d : xSys) scan(d, 1, true);
+    for (int g = 0; g < 2; g++) std::sort(groups[g].begin(), groups[g].end());
+    size_t nProj = groups[0].size();
+    for (int g = 0; g < 2; g++) for (auto& s : groups[g]) out.push_back(s);
+    return nProj;
 }
 
 // ============================================================ árvore de arquivos
@@ -812,10 +1653,11 @@ static void loadConfig() {
         if (!v.empty() && v.back() == '\r') v.pop_back();
         if (k == "run") cfg.run = v; else if (k == "release") cfg.release = v; else if (k == "terminal") cfg.terminal = (v == "1" || v == "on");
         else if (k == "shell") cfg.shell = v; else if (k == "lsp") cfg.lsp = v; else if (k == "lspon") cfg.lspOn = (v == "1" || v == "on");
+        else if (k == "clean") cfg.clean = v; else if (k == "cleanrun") cfg.cleanRun = (v == "1" || v == "on");
     }
 }
 static void saveConfig() {
-    std::ofstream f(toPath(root) / ".vimple.conf"); f << "run=" << cfg.run << "\nrelease=" << cfg.release << "\nterminal=" << (cfg.terminal ? 1 : 0) << "\nshell=" << cfg.shell << "\nlsp=" << cfg.lsp << "\nlspon=" << (cfg.lspOn ? 1 : 0) << "\n";
+    std::ofstream f(toPath(root) / ".vimple.conf"); f << "run=" << cfg.run << "\nrelease=" << cfg.release << "\nterminal=" << (cfg.terminal ? 1 : 0) << "\nshell=" << cfg.shell << "\nlsp=" << cfg.lsp << "\nlspon=" << (cfg.lspOn ? 1 : 0) << "\nclean=" << cfg.clean << "\ncleanrun=" << (cfg.cleanRun ? 1 : 0) << "\n";
 }
 static void lspStart(bool verbose = false); static void lspStop(); static void termKill(); static void sessionLoad(); static void sessionSave(); static void saveLastProject();
 static void openProject(const fs::path& p) {
@@ -823,7 +1665,7 @@ static void openProject(const fs::path& p) {
     lspStop(); termKill();
     { fs::path q = p; q.make_preferred(); root = trimSep(pstr(q)); }
     bufs.clear(); cur = -1; panes.assign(1, Pane()); activePane = 0; expanded.clear(); tree.clear(); treeSel = treeTop = 0;
-    loadConfig(); refreshTree(); showTree = true; focus = F_TREE; mode = NORMAL; outLines.clear(); showOut = false; bottomTab = 0;
+    loadConfig(); xReset(); refreshTree(); showTree = true; focus = F_TREE; mode = NORMAL; outLines.clear(); showOut = false; bottomTab = 0;
     sessionLoad(); lspStart(false); saveLastProject();
 }
 
@@ -926,12 +1768,12 @@ static void runnerStop() {
 static const bool kForceTerminal = false;
 #endif
 static void saveAll() { for (auto& b : bufs) if (b.dirty) saveBuffer(b); }
-static void startRun(bool rel) {
+static void runCmd(const string& cmd, bool allowTerm) {  // roda um comando no painel Output (ou no terminal completo, se configurado)
     if (root.empty()) return;
     if (runner.running) { setMsg("Already running — use the Stop button (F7)", true); return; }
-    saveAll(); string cmd = rel ? cfg.release : cfg.run;
+    saveAll();
     if (cmd.empty()) { setMsg("Empty command — configure in Project > Configure run (F9)", true); return; }
-    if (kForceTerminal || cfg.terminal) {
+    if (allowTerm && (kForceTerminal || cfg.terminal)) {
         def_prog_mode(); endwin();
         printf("\n$ %s\n\n", cmd.c_str()); fflush(stdout);
 #ifdef _WIN32
@@ -944,6 +1786,20 @@ static void startRun(bool rel) {
     }
     outLines.clear(); outScroll = -1; showOut = true; bottomTab = 0; if (focus == F_TERM) focus = F_EDITOR; outTitle = cmd; outPush("$ " + cmd);
     if (!runnerStart(cmd)) setMsg("Failed to start the process", true);
+}
+static void startRun(bool rel) { runCmd(rel ? cfg.release : cfg.run, true); }
+static string defaultClean() {  // comando de limpeza padrão conforme o projeto
+    std::error_code ec;
+    if (fs::exists(toPath(root) / "rsfmake.toml", ec)) return "rsfmake clean";
+    if (fs::exists(toPath(root) / "CMakeLists.txt", ec)) return "cmake --build build --target clean";
+    if (fs::exists(toPath(root) / "Makefile", ec)) return "make clean";
+    return "rsfmake clean";
+}
+static string cleanCommand() { return cfg.clean.empty() ? defaultClean() : cfg.clean; }
+static void startClean() {  // Project > Clean build (opcionalmente seguido de Run, conforme a configuração salva na pasta)
+    string cmd = cleanCommand(); bool chain = cfg.cleanRun;
+    if (chain) cmd += " && " + (releaseMode ? cfg.release : cfg.run);
+    runCmd(cmd, chain);
 }
 static void gotoFilePos(const fs::path& fp, int line, int col) { selectPath(pstr(fp)); openFile(pstr(fp), line, col); }
 static bool jumpFromLine(const string& s) {
@@ -1670,7 +2526,7 @@ static string lspStatus() {
     return s + "  ";
 }
 
-static void bgPoll() { runnerPoll(); termPoll(); lspPoll(); lspTick(); }  // tarefas de fundo (também dentro dos diálogos)
+static void bgPoll() { runnerPoll(); termPoll(); lspPoll(); lspTick(); xTick(); }  // tarefas de fundo (também dentro dos diálogos)
 
 // ============================================================ desenho base
 // IMPORTANTE: atributos são chtype (64 bits no PDCursesMod); guardá-los em int descarta o par de cor.
@@ -1691,7 +2547,7 @@ static void drawBox(int y0, int x0, int h, int w, const string& title) {
 struct MItem { string label, key; int act; };
 enum { ACT_OPEN_PROJECT = 1, ACT_NEW_FILE, ACT_NEW_DIR, ACT_SAVE, ACT_SAVE_ALL, ACT_CLOSE, ACT_QUIT, ACT_UNDO, ACT_REDO, ACT_FIND, ACT_FINDNEXT, ACT_GOTO,
        ACT_TREE, ACT_OUT, ACT_RELTOGGLE, ACT_RUN, ACT_RUN_REL, ACT_STOP, ACT_CONFIG, ACT_REFRESH, ACT_RENAME, ACT_DELETE, ACT_DIAG,
-       ACT_SPLIT_R, ACT_SPLIT_D, ACT_CLOSE_SPLIT, ACT_NEXT_PANE, ACT_TERM, ACT_DEF, ACT_BACK, ACT_HOVER, ACT_LSP_RESTART, ACT_LSP_TOGGLE };
+       ACT_SPLIT_R, ACT_SPLIT_D, ACT_CLOSE_SPLIT, ACT_NEXT_PANE, ACT_TERM, ACT_DEF, ACT_BACK, ACT_HOVER, ACT_LSP_RESTART, ACT_LSP_TOGGLE, ACT_CLEAN, ACT_CLEAN_CFG };
 static const int NMENU = 5;
 static const char* MENU_TITLES[NMENU] = {"File", "Edit", "View", "Code", "Project"};
 static vector<MItem> menuItems(int m) {
@@ -1704,7 +2560,7 @@ static vector<MItem> menuItems(int m) {
                 {string("Mode: ") + (releaseMode ? "Release  (switch to Debug)" : "Debug  (switch to Release)"), "", ACT_RELTOGGLE}, {"Mouse and color diagnostics", "F1", ACT_DIAG}};
     case 3: return {{"Go to definition", "F12 / gd", ACT_DEF}, {"Back from definition", "gb", ACT_BACK}, {"Info under the cursor", "F11 / K", ACT_HOVER},
                 {"Restart language server", "", ACT_LSP_RESTART}, {string("Language server: ") + (cfg.lspOn ? "on  (turn off)" : "off  (turn on)"), "", ACT_LSP_TOGGLE}};
-    default: return {{"Run", "F5", ACT_RUN}, {"Run (release)", "F6", ACT_RUN_REL}, {"Stop", "F7", ACT_STOP}, {"Configure run...", "F9", ACT_CONFIG}, {"Refresh explorer", "", ACT_REFRESH}};
+    default: return {{"Run", "F5", ACT_RUN}, {"Run (release)", "F6", ACT_RUN_REL}, {"Stop", "F7", ACT_STOP}, {"Clean build", "", ACT_CLEAN}, {"Configure clean build...", "", ACT_CLEAN_CFG}, {"Configure run...", "F9", ACT_CONFIG}, {"Refresh explorer", "", ACT_REFRESH}};
     }
 }
 
@@ -1804,6 +2660,7 @@ static void drawPane(int pi) {
     int gut = gutOf(b), digits = gut - 2, tx = P.x + gut, tw = P.w - gut; if (tw < 5) return;
     int& top = act ? b.top : P.top; int& left = act ? b.left : P.left;
     if (act) { clampCursor(b); scrollTo(b, tw); gTX = tx; } else { top = std::max(0, std::min(top, n - 1)); left = std::max(0, left); }
+    gSymOn = isSrcPath(b.path); gLocals = gSymOn ? xLocalsOf(b) : nullptr;
     bool inb = false; for (int y = 0; y < top; y++) scanLine(b.lines[y], inb, nullptr);
     vector<uint8_t> dm;
     for (int r = 0; r < P.h; r++) {
@@ -1828,6 +2685,7 @@ static void drawPane(int pi) {
         }
     }
     if (act) { curSY = P.y + b.cy - top; curSX = tx + vcolOf(b.lines[b.cy], b.cx) - left; }
+    gSymOn = false; gLocals = nullptr;
 }
 static void drawEditor() {
     for (int i = 0; i < (int)panes.size(); i++) drawPane(i);
@@ -1845,6 +2703,14 @@ static void drawTermBody(int y0, int rows) {
             while (d < W && row[d].fg == fg && row[d].fl == fl) { tAppendRun(run, row[d].ch); d++; }
             chtype at = CP(P_TERM + (fg == 8 ? 7 : fg)); if (fl & 1) at |= A_BOLD; if (fl & 2) at |= A_REVERSE; if (fl & 4) at |= A_UNDERLINE;
             attrset(at); mvaddnstr(y0 + r, x, run.c_str(), (int)run.size()); x += d - c; c = d;
+        }
+    }
+    // cursor do terminal: bloco desenhado por software (o cursor de hardware fica escondido para não duplicar)
+    if (focus == F_TERM && term.started && !term.exited && term.showCur && term.scrollOff == 0 && menuOpen < 0 && term.cy >= 0 && term.cy < rows && term.cy < (int)term.grid.size()) {
+        const vector<TCell>& row = term.grid[(size_t)term.cy]; int cx = std::min(term.cx, term.cols - 1);
+        if (cx >= 0 && cx < (int)row.size() && cx < SW) {
+            const TCell& c = row[(size_t)cx]; chtype at = CP(P_TERM + (c.fg == 8 ? 7 : c.fg)); if (c.fl & 1) at |= A_BOLD; if (!(c.fl & 2)) at |= A_REVERSE; if (c.fl & 4) at |= A_UNDERLINE;
+            string run; tAppendRun(run, c.ch); attrset(at); mvaddnstr(y0 + term.cy, cx, run.c_str(), (int)run.size());
         }
     }
 }
@@ -1938,7 +2804,13 @@ static void drawAll() {
 }
 
 // ============================================================ diálogos (UI)
-struct DField { string label, text; bool isCheck = false, check = false; };
+struct DField { string label, text; bool isCheck = false, check = false; int cp = -1, sc = 0; };  // cp = posição do cursor (byte; -1 = fim) · sc = rolagem horizontal
+static string cpSub(const string& s, int from, int n) {  // n pontos de código a partir do ponto `from`
+    size_t i = 0; int k = 0; while (i < s.size() && k < from) { i += cplen((unsigned char)s[i]); k++; }
+    size_t j = i; k = 0; while (j < s.size() && k < n) { j += cplen((unsigned char)s[j]); k++; }
+    return s.substr(std::min(i, s.size()), std::min(j, s.size()) - std::min(i, s.size()));
+}
+static int byteAtCp(const string& s, int col) { int i = 0, k = 0; while (i < (int)s.size() && k < col) { i = nextCp(s, i); k++; } return i; }
 // Retorna índice do botão pressionado, ou -1 (Esc).
 static int dialog(const string& title, const string& body, vector<DField>& f, const vector<string>& btns, int defBtn = 0) {
     int nf = (int)f.size(), nb = (int)btns.size(), foc = nf > 0 ? 0 : nf + defBtn; vector<string> bl = body.empty() ? vector<string>() : splitLines(body);
@@ -1950,15 +2822,22 @@ static int dialog(const string& title, const string& body, vector<DField>& f, co
         int h = 2 + (bl.empty() ? 0 : (int)bl.size() + 1) + rows + 2; int y0 = std::max(0, (SH - h) / 2), x0 = std::max(0, (SW - w) / 2);
         drawBox(y0, x0, h, w, title); int y = y0 + 1;
         for (auto& s : bl) put(y++, x0 + 2, s, CP(P_DLG), w - 4); if (!bl.empty()) y++;
-        struct R { int y, x, w, idx; }; vector<R> frs, brs; int curX = -1, curY = -1;
+        struct R { int y, x, w, idx; }; vector<R> frs, brs; [[maybe_unused]] int curX = -1, curY = -1;
         for (int i = 0; i < nf; i++) {
             if (f[i].isCheck) {
                 bool fo = foc == i; string t = string(f[i].check ? "[x] " : "[ ] ") + f[i].label; fillRow(y, x0 + 2, w - 4, CP(fo ? P_INPF : P_DLG));
                 put(y, x0 + 2, t, CP(fo ? P_INPF : P_DLG)); frs.push_back({y, x0 + 2, w - 4, i}); y += 2;
             } else {
-                put(y, x0 + 2, f[i].label, CP(P_DLGT)); y++; int iw = w - 4; fillRow(y, x0 + 2, iw, CP(foc == i ? P_INPF : P_INP));
-                string shown = tailClip(f[i].text, iw - 2); put(y, x0 + 3, shown, CP(foc == i ? P_INPF : P_INP), iw - 2);
-                if (foc == i) { curY = y; curX = x0 + 3 + ulen(shown); } frs.push_back({y, x0 + 2, iw, i}); y += 2;
+                put(y, x0 + 2, f[i].label, CP(P_DLGT)); y++; int iw = w - 4; chtype ia = CP(foc == i ? P_INPF : P_INP); fillRow(y, x0 + 2, iw, ia);
+                {   // texto com rolagem horizontal e cursor de bloco desenhado por software
+                    DField& d = f[i]; int tw = std::max(1, iw - 2); if (d.cp < 0 || d.cp > (int)d.text.size()) d.cp = (int)d.text.size();
+                    while (d.cp > 0 && d.cp < (int)d.text.size() && (((unsigned char)d.text[d.cp]) & 0xC0) == 0x80) d.cp--;
+                    int ccol = ulen(d.text.substr(0, (size_t)d.cp)), total = ulen(d.text);
+                    if (ccol < d.sc) d.sc = ccol; if (ccol >= d.sc + tw) d.sc = ccol - tw + 1; d.sc = std::max(0, std::min(d.sc, std::max(0, total + 1 - tw)));
+                    put(y, x0 + 3, cpSub(d.text, d.sc, tw), ia, tw);
+                    if (foc == i) { string chs = d.cp < (int)d.text.size() ? cpSub(d.text, ccol, 1) : string(" "); put(y, x0 + 3 + (ccol - d.sc), chs, ia | A_REVERSE); curY = y; curX = x0 + 3 + (ccol - d.sc); }
+                }
+                frs.push_back({y, x0 + 2, iw, i}); y += 2;
             }
         }
         int bx = x0 + std::max(2, (w - bw) / 2), by = y0 + h - 2;
@@ -1966,13 +2845,13 @@ static int dialog(const string& title, const string& body, vector<DField>& f, co
             string t = "  " + btns[i] + "  "; bool fo = foc == nf + i; put(by, bx, t, CP(fo ? P_POPSEL : P_BTNX) | (fo ? A_BOLD : 0));
             brs.push_back({by, bx, ulen(t), i}); bx += ulen(t) + 2;
         }
-        if (curX >= 0) { curs_set(1); move(curY, curX); } else curs_set(0);
+        curs_set(0);  // o cursor é desenhado por software (bloco invertido)
         refresh(); int ch = readKey(50);
         if (ch == ERR || ch == KEY_RESIZE) continue;
         int total = nf + nb;
         if (ch == KEY_MOUSE) {
             MEVENT ev; if (getmouse(&ev) != OK) continue; if (!(ev.bstate & (BUTTON1_PRESSED | BUTTON1_CLICKED))) continue;
-            for (auto& r : frs) if (ev.y == r.y && ev.x >= r.x && ev.x < r.x + r.w) { foc = r.idx; if (f[r.idx].isCheck) f[r.idx].check = !f[r.idx].check; }
+            for (auto& r : frs) if (ev.y == r.y && ev.x >= r.x && ev.x < r.x + r.w) { foc = r.idx; if (f[r.idx].isCheck) f[r.idx].check = !f[r.idx].check; else { DField& d = f[r.idx]; d.cp = byteAtCp(d.text, std::max(0, ev.x - (r.x + 1) + d.sc)); } }
             for (auto& r : brs) if (ev.y == r.y && ev.x >= r.x && ev.x < r.x + r.w) return r.idx;
             continue;
         }
@@ -1988,9 +2867,16 @@ static int dialog(const string& title, const string& body, vector<DField>& f, co
         DField& d = f[foc];
         if (d.isCheck) { if (ch == ' ' || ch == 10 || ch == 13) d.check = !d.check; continue; }
         if (ch == 10 || ch == 13 || ch == KEY_ENTER) return defBtn;
-        if (ch == 127 || ch == 8 || ch == KEY_BACKSPACE) { if (!d.text.empty()) d.text.erase(prevCp(d.text, (int)d.text.size())); }
-        else if (ch == 21) d.text.clear();
-        else if (ch >= 32 && ch < 256 && ch != 127) d.text += (char)ch;
+        if (d.cp < 0 || d.cp > (int)d.text.size()) d.cp = (int)d.text.size();
+        if (ch == 127 || ch == 8 || ch == KEY_BACKSPACE) { if (d.cp > 0) { int p = prevCp(d.text, d.cp); d.text.erase((size_t)p, (size_t)(d.cp - p)); d.cp = p; } }
+        else if (ch == KEY_DC) { if (d.cp < (int)d.text.size()) d.text.erase((size_t)d.cp, (size_t)(nextCp(d.text, d.cp) - d.cp)); }
+        else if (ch == KEY_LEFT) d.cp = prevCp(d.text, d.cp);
+        else if (ch == KEY_RIGHT) d.cp = nextCp(d.text, d.cp);
+        else if (ch == KEY_HOME || ch == 1) d.cp = 0;
+        else if (ch == KEY_END || ch == 5) d.cp = (int)d.text.size();
+        else if (ch == 21) { d.text.clear(); d.cp = 0; }
+        else if (ch == 11) d.text.erase((size_t)d.cp);
+        else if (ch >= 32 && ch < 256 && ch != 127) { d.text.insert((size_t)d.cp, 1, (char)ch); d.cp++; }
     }
 }
 static int msgBox(const string& title, const string& body, const vector<string>& btns) { vector<DField> none; return dialog(title, body, none, btns, 0); }
@@ -2115,6 +3001,52 @@ static bool pickFolder(const string& startDir, string& out) {
 
 // ============================================================ autocomplete
 static bool isWordCh(char c) { return isalnum((unsigned char)c) || c == '_' || (unsigned char)c >= 128; }
+static void localPopup(Buffer& b, bool force) {  // sem LSP (ou quando ele não trouxe nada): índice do projeto + dicionário + palavras do arquivo
+    pop.on = false; pop.items.clear(); pop.ins.clear(); pop.sel = 0; const string& l = b.lines[b.cy]; int cx = b.cx;
+    int ws = cx; while (ws > 0 && isWordCh(l[ws - 1])) ws--; string word = l.substr(ws, cx - ws);
+    int ctx = 0, ee = 0;  // 1 = obj. ou ptr->  ·  2 = Tipo::
+    if (ws >= 1 && l[ws - 1] == '.') { ctx = 1; ee = ws - 1; }
+    else if (ws >= 2 && l[ws - 2] == '-' && l[ws - 1] == '>') { ctx = 1; ee = ws - 2; }
+    else if (ws >= 2 && l[ws - 2] == ':' && l[ws - 1] == ':') { ctx = 2; ee = ws - 2; }
+    if (ctx) {
+        int os = ee; while (os > 0 && isWordCh(l[os - 1])) os--; string obj = l.substr(os, ee - os);
+        if (!obj.empty() && isdigit((unsigned char)obj[0])) return;  // 1.5
+        if (!(ctx == 2 && obj == "std")) {
+            std::set<string> owners; bool any = false;
+            if (ctx == 2) { if (obj.empty()) return; xOwners(obj, owners, 0); }
+            else { string ty = obj == "this" ? string() : xVarType(b, obj); if (ty.empty()) { any = true; if (word.empty() && !force) return; } else xOwners(ty, owners, 0); }
+            vector<std::pair<string, uint8_t>> mem; xMembers(owners, any, word, mem);
+            for (auto& m : mem) { pop.items.push_back(m.first + "  " + xTag(m.second)); pop.ins.push_back(m.first); }
+            pop.start = ws; pop.on = !pop.items.empty(); return;
+        }
+    }
+    int st = cx; while (st > 0 && (isWordCh(l[st - 1]) || l[st - 1] == ':')) st--;
+    while (st < cx && l[st] == ':' && !(st + 1 < cx && l[st + 1] == ':' && st > 0 && isWordCh(l[st - 1]))) { if (st + 1 < cx && l[st + 1] == ':') break; st++; }
+    if (st > 0 && l[st - 1] == '#') st--;
+    string pre = l.substr(st, cx - st); size_t minLen = force ? 1 : 2;
+    if (pre.size() < minLen || isdigit((unsigned char)pre[0])) return;
+    std::set<string> seen; vector<std::pair<string, string>> res;  // (texto inserido, rótulo)
+    auto add = [&](const string& w, const char* tag) { if (res.size() >= 60 || w == pre || !seen.insert(w).second) return; res.push_back({w, (tag && *tag) ? w + "  " + tag : w}); };
+    bool plain = pre.find(':') == string::npos;
+    if (plain) {  // 1) variáveis locais/parâmetros do arquivo  2) símbolos do projeto e dos includes (índice)
+        if (const XFile* xf = xFileOf(b)) { std::set<string> ls; for (auto& kv : xf->locals) if (startsWith(kv.first, pre)) ls.insert(kv.first); for (auto& w : ls) add(w, xf->locals.at(w) == SK_TYPE ? "type" : "var"); }
+        int n = 0; for (auto it = xNames.lower_bound(pre); it != xNames.end() && startsWith(*it, pre) && n < 40; ++it, n++) { auto f = xAgg.find(*it); add(*it, f != xAgg.end() ? xTag(f->second.best) : ""); }
+    }
+    if (b.lines.size() <= 20000) {  // 3) outras palavras do arquivo
+        std::set<string> bw;
+        for (auto& line : b.lines) {
+            size_t i = 0; while (i < line.size()) {
+                if (isWordCh(line[i]) && !isdigit((unsigned char)line[i])) { size_t j = i; while (j < line.size() && isWordCh(line[j])) j++; if (j - i > pre.size() && line.compare(i, pre.size(), pre) == 0) bw.insert(line.substr(i, j - i)); i = j; }
+                else i++;
+            }
+        }
+        for (auto& w : bw) add(w, "");
+    }
+    for (auto& w : DICT) if (startsWith(w, pre)) add(w, "");  // 4) palavras-chave, tipos e nomes comuns de bibliotecas
+    if (plain) { string stdpre = "std::" + pre; for (auto& w : DICT) if (startsWith(w, stdpre)) add(w, ""); }
+    for (auto& r : res) { pop.ins.push_back(r.first); pop.items.push_back(r.second); }
+    pop.start = st; pop.on = !pop.items.empty();
+}
 static void lspShowPopup(Buffer& b) {  // filtra os itens do servidor pelo prefixo digitado
     pop.on = false; pop.items.clear(); pop.ins.clear(); pop.sel = 0; if (!lsp.cValid || b.path != lsp.cPath || b.cy != lsp.cY) return;
     const string& l = b.lines[b.cy]; if (lsp.cSt > b.cx || lsp.cSt > (int)l.size()) return;
@@ -2129,6 +3061,7 @@ static void lspShowPopup(Buffer& b) {  // filtra os itens do servidor pelo prefi
             pop.items.push_back(lb); pop.ins.push_back(it->ins);
         }
     pop.start = lsp.cSt; pop.on = !pop.items.empty();
+    if (!pop.on) localPopup(b, false);  // o servidor não trouxe nada: usa o índice do projeto
 }
 static void lspPopupUpdate(Buffer& b, bool force) {
     pop.on = false; pop.items.clear(); pop.ins.clear(); pop.sel = 0; const string& l = b.lines[b.cy]; int cx = b.cx, st = identStart(b);
@@ -2149,38 +3082,28 @@ static void updatePopup(Buffer& b, bool force) {
     size_t s = l.find_first_not_of(" \t");
     bool inc = s != string::npos && l.compare(s, 8, "#include") == 0 && (int)(s + 8) <= cx;
     if (!inc && lspUsable(b)) { lspPopupUpdate(b, force); return; }
-    if (s != string::npos && l.compare(s, 8, "#include") == 0 && (int)(s + 8) <= cx) {
+    if (inc) {  // caminhos de #include: pastas do arquivo/projeto, dependências (rsfmake.toml / CMakeLists.txt) e sistema
         int pos = -1; for (int i = cx - 1; i >= (int)s + 8; i--) { if (l[i] == '<' || l[i] == '"') { pos = i; break; } if (l[i] == '>') break; }
-        if (pos < 0) return; string pre = l.substr(pos + 1, cx - pos - 1);
-        vector<string> a, c; for (auto& h : HDRS) { size_t p = h.find(pre); if (p == 0) a.push_back(h); else if (p != string::npos) c.push_back(h); }
-        for (auto& h : a) pop.items.push_back(h); for (auto& h : c) pop.items.push_back(h);
-        if (pop.items.size() > 60) pop.items.resize(60); pop.start = pos + 1; pop.on = !pop.items.empty(); return;
+        if (pos < 0) return; string pre = l.substr(pos + 1, cx - pos - 1); bool quoted = l[pos] == '"';
+        vector<string> live; size_t nProj = xIncludeItems(b, quoted, pre, live); std::set<string> seen; vector<string> out;
+        auto add = [&](const string& h) { if (out.size() < 60 && seen.insert(h).second) out.push_back(h); };
+        for (size_t i = 0; i < nProj && i < live.size(); i++) add(live[i]);
+        for (auto& h : HDRS) if (h.compare(0, pre.size(), pre) == 0) add(h);
+        for (size_t i = nProj; i < live.size(); i++) add(live[i]);
+        for (auto& h : HDRS) if (h.find(pre) != string::npos) add(h);
+        pop.items = out; pop.ins = out; pop.start = pos + 1; pop.on = !pop.items.empty(); return;
     }
-    int st = cx; while (st > 0 && (isWordCh(l[st - 1]) || l[st - 1] == ':')) st--;
-    while (st < cx && l[st] == ':' && !(st + 1 < cx && l[st + 1] == ':' && st > 0 && isWordCh(l[st - 1]))) { if (st + 1 < cx && l[st + 1] == ':') break; st++; }
-    if (st > 0 && l[st - 1] == '#') st--;
-    string pre = l.substr(st, cx - st); size_t minLen = force ? 1 : 2;
-    if (pre.size() < minLen || isdigit((unsigned char)pre[0])) return;
-    std::set<string> seen; vector<string> prim, sec;
-    for (auto& w : DICT) if (w != pre && startsWith(w, pre)) { prim.push_back(w); seen.insert(w); }
-    string stdpre = "std::" + pre; for (auto& w : DICT) if (!seen.count(w) && startsWith(w, stdpre)) { sec.push_back(w); seen.insert(w); }
-    std::set<string> bw;
-    for (auto& line : b.lines) {
-        size_t i = 0; while (i < line.size()) {
-            if (isWordCh(line[i]) && !isdigit((unsigned char)line[i])) { size_t j = i; while (j < line.size() && isWordCh(line[j])) j++; string w = line.substr(i, j - i); if (w.size() > pre.size() && startsWith(w, pre)) bw.insert(w); i = j; }
-            else i++;
-        }
-    }
-    for (auto& w : bw) if (!seen.count(w)) prim.push_back(w);
-    for (auto& w : sec) prim.push_back(w);
-    if (prim.size() > 60) prim.resize(60); pop.items = prim; pop.start = st; pop.on = !pop.items.empty();
+    localPopup(b, force);
 }
 static void acceptPopup(Buffer& b) {
     if (!pop.on) return; string item = pop.ins.size() == pop.items.size() ? pop.ins[pop.sel] : pop.items[pop.sel]; string& l = b.lines[b.cy]; char open = pop.start > 0 ? l[pop.start - 1] : 0;
+    size_t fn = l.find_first_not_of(" \t"); bool incLine = fn != string::npos && l.compare(fn, 8, "#include") == 0, dirItem = incLine && !item.empty() && item.back() == '/';
     l.replace(pop.start, b.cx - pop.start, item); b.cx = pop.start + (int)item.size();
-    if (open == '<' && (b.cx >= (int)l.size() || l[b.cx] != '>')) { l.insert(b.cx, ">"); b.cx++; }
-    else if (open == '"' && (b.cx >= (int)l.size() || l[b.cx] != '"')) { l.insert(b.cx, "\""); b.cx++; }
-    pop.on = false;
+    if (incLine && !dirItem) {
+        if (open == '<' && (b.cx >= (int)l.size() || l[b.cx] != '>')) { l.insert(b.cx, ">"); b.cx++; }
+        else if (open == '"' && (b.cx >= (int)l.size() || l[b.cx] != '"')) { l.insert(b.cx, "\""); b.cx++; }
+    }
+    pop.on = false; if (dirItem) updatePopup(b, true);  // escolheu uma pasta: já sugere o conteúdo dela
 }
 
 // ============================================================ edição (teclas)
@@ -2533,6 +3456,16 @@ static void doConfig() {
         setMsg("Settings saved to .vimple.conf" + string(term.started && !f[3].text.empty() ? " (the shell change applies to the next terminal)" : "")); return;
     }
 }
+static void doCleanConfig() {  // Project > Configure clean build...: salvo em .vimple.conf da pasta aberta e recarregado ao abrir a pasta
+    vector<DField> f = {{"Clean build command:", cleanCommand()}, {"Run the project right after cleaning (clean build + run)", "", true, cfg.cleanRun}};
+    for (;;) {
+        int r = dialog("Configure clean build", "Runs in the project folder. Saved in .vimple.conf of this folder.\nDefault for this project: " + defaultClean(), f, {"Save", "Default", "Cancel"});
+        if (r == 1) { f[0].text = defaultClean(); f[0].cp = -1; f[1].check = false; continue; }
+        if (r != 0) return;
+        cfg.clean = f[0].text; cfg.cleanRun = f[1].check; saveConfig();
+        setMsg("Clean build saved to .vimple.conf: " + cleanCommand() + (cfg.cleanRun ? "  (then runs the project)" : "")); return;
+    }
+}
 static void doOpenProject() {
     if (!root.empty() && !confirmDiscard("Open another project")) return;
     string path; std::error_code ecc; string start = root.empty() ? pstr(fs::current_path(ecc)) : pstr(toPath(root).parent_path());
@@ -2553,16 +3486,16 @@ static void doDiag() {
         snprintf(t, sizeof t, "Pairs: limit=%d  used=%d  failures=%d", diagPairLim, diagPairUsed, diagPairFail);
         put(y++, 1, t, CP(P_TEXT)); y++;
         put(y++, 1, "Samples (each word should have a different color):", CP(P_HINT));
-        const char* nm[9] = {"text", "kw", "type", "str", "num", "comment", "pre", "func", "op"};
+        const char* nm[S_N] = {"text", "kw", "type", "str", "num", "comment", "pre", "func", "op", "usertype", "var", "const"};
         put(y, 1, "A", CP(P_HINT)); int x = 4;
-        for (int k = 0; k < 9; k++) { attrset(CP(P_SYN + k)); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
+        for (int k = 0; k < S_N; k++) { attrset(CP(P_SYN + k)); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
         y++; put(y, 1, "B", CP(P_HINT)); x = 4;  // mesma coisa, mas escolhendo o par com color_set() em vez de COLOR_PAIR()
-        for (int k = 0; k < 9; k++) { attrset(A_NORMAL); color_set((short)PM[P_SYN + k], nullptr); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
+        for (int k = 0; k < S_N; k++) { attrset(A_NORMAL); color_set((short)PM[P_SYN + k], nullptr); mvaddnstr(y, x, nm[k], (int)strlen(nm[k])); x += (int)strlen(nm[k]) + 2; }
         attrset(A_NORMAL); color_set((short)PM[P_TEXT], nullptr); y++;
         put(y, 1, "C", CP(P_HINT)); put(y, 4, " INSERT ", CP(P_MODE_I) | A_BOLD); put(y, 14, " ▶ Run ", CP(P_BTN) | A_BOLD); put(y, 22, "folder/", CP(P_DIR) | A_BOLD);
         put(y, 30, "error", CP(P_ERR)); put(y, 36, "warn", CP(P_WARN)); put(y, 43, "ok", CP(P_OK)); y += 2;
         string pc = "Stored pairs (id:fg/bg): ";
-        for (int k = 0; k < 9; k++) { short f = -1, b = -1; pair_content((short)PM[P_SYN + k], &f, &b); snprintf(t, sizeof t, "%d:%d/%d ", PM[P_SYN + k], f, b); pc += t; }
+        for (int k = 0; k < S_N; k++) { short f = -1, b = -1; pair_content((short)PM[P_SYN + k], &f, &b); snprintf(t, sizeof t, "%d:%d/%d ", PM[P_SYN + k], f, b); pc += t; }
         put(y++, 1, pc, CP(P_TEXT)); y++;
         snprintf(t, sizeof t, "Here: press=%ld release=%ld click=%ld motion=%ld wheel=%ld other=%ld  bits seen=0x%lx", nPress, nRel, nClick, nMove, nWheel, nOther, seen);
         put(y++, 1, t, CP(P_TEXT));
@@ -2608,7 +3541,9 @@ static void doAction(int a) {
     case ACT_RUN_REL: startRun(true); break;
     case ACT_STOP: if (runner.running) runnerStop(); break;
     case ACT_CONFIG: doConfig(); break;
-    case ACT_REFRESH: refreshTree(); break;
+    case ACT_CLEAN: startClean(); break;
+    case ACT_CLEAN_CFG: doCleanConfig(); break;
+    case ACT_REFRESH: refreshTree(); xRescan(); break;
     case ACT_RENAME: doRename(); break;
     case ACT_DELETE: doDelete(); break;
     case ACT_DIAG: doDiag(); break;
@@ -2643,7 +3578,7 @@ static void treeKey(int ch) {
             else { for (int i = treeSel - 1; i >= 0; i--) if (tree[i].dir && tree[i].depth < nd.depth) { treeSel = i; break; } } }
         break;
     case 'a': doNewEntry(false); break; case 'A': doNewEntry(true); break;
-    case 'r': doRename(); break; case 'd': case KEY_DC: doDelete(); break; case 'R': refreshTree(); break;
+    case 'r': doRename(); break; case 'd': case KEY_DC: doDelete(); break; case 'R': refreshTree(); xRescan(); break;
     case 27: if (cur >= 0) focus = F_EDITOR; break;
     }
 }
@@ -2696,7 +3631,7 @@ static void handleMouse() {
         return;
     }
     if (showTree && x < L.treeW && y >= L.edY && y < L.outY) {
-        if (y == L.edY + 1) { for (auto& h : treeBtns) if (x >= h.x0 && x < h.x1) { focus = F_TREE; switch (h.idx) { case 0: doNewEntry(false); break; case 1: doNewEntry(true); break; case 2: doRename(); break; case 3: doDelete(); break; default: refreshTree(); } return; } return; }
+        if (y == L.edY + 1) { for (auto& h : treeBtns) if (x >= h.x0 && x < h.x1) { focus = F_TREE; switch (h.idx) { case 0: doNewEntry(false); break; case 1: doNewEntry(true); break; case 2: doRename(); break; case 3: doDelete(); break; default: refreshTree(); xRescan(); } return; } return; }
         int i = treeTop + (y - (L.edY + 2)); if (y >= L.edY + 2 && i >= 0 && i < (int)tree.size()) { treeSel = i; focus = F_TREE; treeActivate(); }
         return;
     }
@@ -2914,6 +3849,7 @@ int main(int argc, char** argv) {
         bgPoll(); runDeferred(); drawAll();
         bool termVis = term.started && showOut && bottomTab == 1;
         int to = termVis ? 20 : runner.running ? 50 : (lsp.state == 1 || lsp.inflight) ? 40 : (lsp.state == 2 || lsp.p.alive) ? 120 : -1;
+        { int xw = xWantMs(); if (xw > 0 && (to < 0 || xw < to)) to = xw; }  // mantém o índice de símbolos andando sem atrasar as teclas
         int ch = readKey(to);
         if (ch != ERR) handleKey(ch);
         if (mode != INSERT) { insSel = false; insKind = 0; dragging = false; }
